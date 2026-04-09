@@ -1,9 +1,10 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import os
 import re
 import json
 import logging
-import threading
+import asyncio
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -12,7 +13,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext, CallbackQueryHandler
 import gspread
 
-# ==================== ФИКТИВНЫЙ ВЕБ-СЕРВЕР (для Render) ====================
+# ==================== ФИКТИВНЫЙ ВЕБ-СЕРВЕР ====================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -20,7 +21,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"OK")
     
     def log_message(self, format, *args):
-        pass  # Отключаем логирование HTTP-запросов
+        pass
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
@@ -34,6 +35,7 @@ SHEET_ID = os.getenv("SHEET_ID")
 GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDENTIALS")
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 def get_sheet():
     creds_dict = json.loads(GOOGLE_CREDS_JSON)
@@ -256,17 +258,23 @@ async def handle_price(update: Update, context: CallbackContext):
 
 # ==================== ЗАПУСК ====================
 def main():
-    # Запускаем веб-сервер в отдельном потоке (для Render)
+    # Запускаем веб-сервер в отдельном потоке
+    import threading
     threading.Thread(target=run_web_server, daemon=True).start()
     
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_handler(MessageHandler(filters.Regex(r'^\d+$'), handle_price))
+    # Создаём приложение
+    application = Application.builder().token(BOT_TOKEN).build()
     
-    print("Бот запущен...")
-    app.run_polling()
+    # Добавляем обработчики
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(MessageHandler(filters.Regex(r'^\d+$'), handle_price))
+    
+    logger.info("Бот запущен...")
+    
+    # Запускаем бота
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
