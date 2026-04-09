@@ -185,7 +185,7 @@ async def handle_message(update: Update, context: CallbackContext):
         context.user_data["state"] = None
     
     # Автораспознавание текста заказа
-    elif re.search(r'\d{10,12}|\d+\.?\d*\s*кг', text, re.IGNORECASE):
+    if re.search(r'\d{10}|\d+\.?\d*\s*кг', text, re.IGNORECASE):
         p = parse_text(text)
         if p["name"] or p["phone"]:
             items_text = ", ".join(p["items"]) if p["items"] else "Не указано"
