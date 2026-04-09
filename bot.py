@@ -3,12 +3,29 @@ import os
 import re
 import json
 import logging
+import threading
 from datetime import datetime
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext, CallbackQueryHandler, ConversationHandler
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext, CallbackQueryHandler
 import gspread
+
+# ==================== ФИКТИВНЫЙ ВЕБ-СЕРВЕР (для Render) ====================
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+    
+    def log_message(self, format, *args):
+        pass  # Отключаем логирование HTTP-запросов
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    server.serve_forever()
 
 # ==================== НАСТРОЙКИ ====================
 load_dotenv()
@@ -18,7 +35,6 @@ GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDENTIALS")
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 
-# Подключение к Google Sheets
 def get_sheet():
     creds_dict = json.loads(GOOGLE_CREDS_JSON)
     gc = gspread.service_account_from_dict(creds_dict)
@@ -93,12 +109,10 @@ def get_orders_by_date(date_str):
 def parse_text(text):
     result = {"name": None, "phone": None, "items": [], "date": None}
     
-    # Телефон
     phone = re.search(r'(\+?7\d{10}|\+?\d{10,12})', text.replace(" ", "").replace("-", ""))
     if phone:
         result["phone"] = phone.group(1)
     
-    # Имя
     name = re.search(r'([А-Яа-я]{2,})\s*(?:тел|7|8|\+|,)', text, re.IGNORECASE)
     if name:
         result["name"] = name.group(1).capitalize()
@@ -107,12 +121,10 @@ def parse_text(text):
         if first:
             result["name"] = first.group(1).capitalize()
     
-    # Позиции
     items = re.findall(r'([А-Яа-я]{3,})\s+(\d+\.?\d*)\s*(?:кг|kg)?', text, re.IGNORECASE)
     for item, w in items:
         result["items"].append(f"{item.capitalize()} {w}кг")
     
-    # Дата
     date = re.search(r'(понедельник|вторник|сред[ау]|четверг|пятниц[ау]|суббот[ау]|воскресенье|\d{1,2}[\.-]\d{1,2})', text, re.IGNORECASE)
     result["date"] = date.group(1).lower() if date else "сегодня"
     
@@ -128,7 +140,6 @@ async def start(update: Update, context: CallbackContext):
 async def handle_message(update: Update, context: CallbackContext):
     text = update.message.text
     
-    # Главное меню
     if text == "➕ Новый заказ":
         await update.message.reply_text("Введите имя клиента:")
         context.user_data["state"] = "WAIT_NAME"
@@ -151,7 +162,6 @@ async def handle_message(update: Update, context: CallbackContext):
         orders = get_active_orders()
         await show_orders(update, orders, "все")
     
-    # Состояния
     elif context.user_data.get("state") == "WAIT_NAME":
         context.user_data["new_name"] = text
         await update.message.reply_text("Введите телефон:")
@@ -184,8 +194,7 @@ async def handle_message(update: Update, context: CallbackContext):
             await update.message.reply_text("Ничего не найдено.", reply_markup=main_menu())
         context.user_data["state"] = None
     
-    # Автораспознавание текста заказа
-    if re.search(r'\d{10}|\d+\.?\d*\s*кг', text, re.IGNORECASE):
+    elif re.search(r'\d{10}|\d+\.?\d*\s*кг', text, re.IGNORECASE):
         p = parse_text(text)
         if p["name"] or p["phone"]:
             items_text = ", ".join(p["items"]) if p["items"] else "Не указано"
@@ -247,6 +256,9 @@ async def handle_price(update: Update, context: CallbackContext):
 
 # ==================== ЗАПУСК ====================
 def main():
+    # Запускаем веб-сервер в отдельном потоке (для Render)
+    threading.Thread(target=run_web_server, daemon=True).start()
+    
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_callback))
