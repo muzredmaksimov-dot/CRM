@@ -5,6 +5,7 @@ import re
 import json
 import logging
 import asyncio
+import threading
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -95,7 +96,7 @@ def find_orders(query):
     q = query.lower()
     result = []
     for o in orders:
-        if q in o[2].lower() or q in o[3].lower() or q == o[0]:
+        if len(o) > 3 and (q in o[2].lower() or q in o[3].lower() or q == o[0]):
             result.append(o)
     return result
 
@@ -103,7 +104,7 @@ def get_orders_by_date(date_str):
     orders = get_active_orders()
     result = []
     for o in orders:
-        if date_str.lower() in o[5].lower():
+        if len(o) > 5 and date_str.lower() in o[5].lower():
             result.append(o)
     return result
 
@@ -257,15 +258,10 @@ async def handle_price(update: Update, context: CallbackContext):
         del context.user_data["price_for"]
 
 # ==================== ЗАПУСК ====================
-def main():
-    # Запускаем веб-сервер в отдельном потоке
-    import threading
-    threading.Thread(target=run_web_server, daemon=True).start()
-    
-    # Создаём приложение
+async def main_async():
+    """Асинхронная функция запуска"""
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Добавляем обработчики
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
@@ -273,8 +269,14 @@ def main():
     
     logger.info("Бот запущен...")
     
-    # Запускаем бота
-    application.run_polling()
+    await application.run_polling()
+
+def main():
+    # Запускаем веб-сервер в отдельном потоке
+    threading.Thread(target=run_web_server, daemon=True).start()
+    
+    # Запускаем бота с правильным event loop
+    asyncio.run(main_async())
 
 if __name__ == "__main__":
     main()
