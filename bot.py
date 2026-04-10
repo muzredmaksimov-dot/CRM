@@ -242,117 +242,150 @@ def export_orders_to_csv(orders):
     output.seek(0)
     return output.getvalue().encode('utf-8-sig')
 
-# ==================== ИСПРАВЛЕННЫЙ ПАРСЕР ====================
+# ==================== ПАРСЕР v3.0 ====================
 def parse_order_text(text):
-    """Исправленный парсер для кривых сообщений"""
+    """Парсер v3.0 - с правильной обработкой телефона и граммов"""
     result = {"name": "", "phone": "", "items": [], "date": None}
     
-    text_clean = text.replace('\n', ' ').replace('\r', ' ')
+    text_clean = text.replace('\n', ' ').replace('\r', ' ').strip()
     text_lower = text_clean.lower()
     
     # ===== ТЕЛЕФОН =====
-    phone_digits = re.sub(r'[^\d]', '', text_clean)
-    phone_match = re.search(r'(\d{10,12})', phone_digits)
-    if phone_match:
-        result["phone"] = phone_match.group(1)
-        text_clean = re.sub(r'[\+\d\s\(\)\-]{10,}', ' ', text_clean)
-        text_clean = re.sub(r'\s+', ' ', text_clean).strip()
-        text_lower = text_clean.lower()
+    all_digits = re.findall(r'\d+', text_clean)
+    
+    for digits in sorted(all_digits, key=len, reverse=True):
+        if 10 <= len(digits) <= 12:
+            result["phone"] = digits
+            text_clean = text_clean.replace(digits, '').strip()
+            text_lower = text_clean.lower()
+            break
+    
+    if not result["phone"]:
+        phone_patterns = [
+            r'(\+?\d[\d\s\-\(\)]{8,}\d)',
+            r'(\d[\d\s]{8,}\d)',
+        ]
+        for pattern in phone_patterns:
+            match = re.search(pattern, text_clean)
+            if match:
+                digits_only = re.sub(r'[^\d]', '', match.group(1))
+                if 10 <= len(digits_only) <= 12:
+                    result["phone"] = digits_only
+                    text_clean = text_clean.replace(match.group(1), '').strip()
+                    text_lower = text_clean.lower()
+                    break
     
     # ===== ИМЯ =====
+    text_for_name = re.sub(r'[^а-яёa-z\s]', ' ', text_lower, flags=re.IGNORECASE)
+    text_for_name = re.sub(r'\s+', ' ', text_for_name).strip()
+    
     not_names = {
         'ребра', 'рёбра', 'ребро', 'грудинка', 'грудника', 'грудинки',
         'форель', 'форели', 'сало', 'сала', 'окорок', 'окорока',
-        'колбаса', 'колбасы', 'кг', 'гр', 'грамм', 'тел', 'телефон',
-        'заказ', 'хочу', 'возьми', 'положи', 'на', 'в', 'с', 'и', 'а',
-        'к', 'г'
+        'колбаса', 'колбасы', 'шейка', 'шейки', 'карбонад', 'буженина',
+        'кг', 'гр', 'г', 'грамм', 'килограмм',
+        'тел', 'телефон', 'заказ', 'хочу', 'возьми', 'положи',
+        'на', 'в', 'с', 'и', 'а', 'к', 'от', 'до', 'по', 'у',
+        'я', 'мне', 'меня'
     }
     
-    words = text_clean.split()
-    
+    words = text_for_name.split()
     for word in words:
-        word_clean = re.sub(r'[^\w]', '', word)
-        if len(word_clean) >= 2 and word_clean.lower() not in not_names:
-            if not word_clean.replace('.', '').replace(',', '').isdigit():
-                result["name"] = word_clean.capitalize()
-                break
+        word_clean = word.strip('.,!?;:')
+        if len(word_clean) >= 2 and word_clean not in not_names:
+            result["name"] = word_clean.capitalize()
+            break
     
     if not result["name"]:
         for word in words:
-            word_clean = re.sub(r'[^\w]', '', word)
-            if len(word_clean) >= 2 and not word_clean.replace('.', '').replace(',', '').isdigit():
-                result["name"] = word_clean.capitalize()
+            if not word.isdigit() and len(word) >= 2:
+                result["name"] = word.capitalize()
                 break
     
     if not result["name"]:
         result["name"] = "Клиент"
     
     # ===== ПОЗИЦИИ =====
-    def fix_comma(s):
-        return re.sub(r'(\d+),(\d+)', r'\1.\2', s)
-    
-    text_fixed = fix_comma(text_lower)
     found_items = []
     
-    # Паттерн 1: "продукт 0,5кг"
-    item_pattern1 = re.compile(
-        r'([а-яёa-z]{2,})\s*[:\-\s]?\s*(\d+[\.\,]?\d*)\s*(?:кг|гр?|грамм|kg|g)?',
+    def parse_weight(w_str, unit_hint=''):
+        try:
+            w_str = w_str.replace(',', '.')
+            weight = float(w_str)
+            
+            unit_lower = unit_hint.lower() if unit_hint else ''
+            
+            if 'гр' in unit_lower or 'г' in unit_lower or 'gr' in unit_lower or 'g' in unit_lower:
+                if weight >= 50:
+                    weight = weight / 1000
+            elif weight > 100 and 'кг' not in text_lower and 'kg' not in text_lower:
+                weight = weight / 1000
+            
+            return weight
+        except:
+            return None
+    
+    pattern1 = re.compile(
+        r'([а-яёa-z]{2,})\s*[:\-\s]?\s*(\d+[\.\,]?\d*)\s*(кг|гр?|грамм|kg|g)?',
         re.IGNORECASE
     )
     
-    for match in item_pattern1.finditer(text_fixed):
+    for match in pattern1.finditer(text_lower):
         name = match.group(1).strip()
-        weight = match.group(2).strip().replace(',', '.')
+        weight_str = match.group(2).strip()
+        unit = match.group(3) if match.group(3) else ''
         
-        if name.lower() in ['тел', 'телефон', 'заказ', 'сегодня', 'завтра', 'пятница', result["name"].lower()]:
+        if name in ['тел', 'телефон', 'заказ', 'сегодня', 'завтра']:
+            continue
+        if name == result["name"].lower():
             continue
         
-        match_text = match.group(0).lower()
-        if 'гр' in match_text or ' г ' in match_text or match_text.endswith('г'):
-            weight_val = float(weight)
-            if weight_val >= 100:
-                weight = str(weight_val / 1000)
+        weight = parse_weight(weight_str, unit)
+        if weight is None:
+            continue
         
-        found_items.append(f"{name.capitalize()} {weight}кг")
+        if weight == int(weight):
+            weight_display = str(int(weight))
+        else:
+            weight_display = str(weight).rstrip('0').rstrip('.') if '.' in str(weight) else str(weight)
+        
+        found_items.append(f"{name.capitalize()} {weight_display}кг")
     
-    # Паттерн 2: "200гр форели"
-    item_pattern2 = re.compile(
-        r'(\d+[\.\,]?\d*)\s*(?:кг|гр?|грамм|kg|g)?\s+([а-яёa-z]{2,})',
+    pattern2 = re.compile(
+        r'(\d+[\.\,]?\d*)\s*(кг|гр?|грамм|kg|g)?\s+([а-яёa-z]{2,})',
         re.IGNORECASE
     )
     
-    for match in item_pattern2.finditer(text_fixed):
-        weight = match.group(1).strip().replace(',', '.')
-        name = match.group(2).strip()
+    for match in pattern2.finditer(text_lower):
+        weight_str = match.group(1).strip()
+        unit = match.group(2) if match.group(2) else ''
+        name = match.group(3).strip()
         
-        if name.lower() in ['тел', 'телефон', 'заказ', 'сегодня', 'завтра', result["name"].lower()]:
+        if name in ['тел', 'телефон', 'заказ']:
+            continue
+        if name == result["name"].lower():
             continue
         
-        match_text = match.group(0).lower()
-        if 'гр' in match_text or ' г ' in match_text:
-            weight_val = float(weight)
-            if weight_val >= 100:
-                weight = str(weight_val / 1000)
+        weight = parse_weight(weight_str, unit)
+        if weight is None:
+            continue
         
-        found_items.append(f"{name.capitalize()} {weight}кг")
-    
-    result["items"] = list(set(found_items))
-    
-    if not result["items"]:
-        rest_words = []
-        for w in words:
-            w_clean = re.sub(r'[^\w]', '', w).lower()
-            if w_clean == result["name"].lower():
-                continue
-            if w_clean.isdigit() and len(w_clean) >= 10:
-                continue
-            rest_words.append(w)
+        if weight == int(weight):
+            weight_display = str(int(weight))
+        else:
+            weight_display = str(weight).rstrip('0').rstrip('.') if '.' in str(weight) else str(weight)
         
-        if rest_words:
-            result["items"] = [" ".join(rest_words)]
+        found_items.append(f"{name.capitalize()} {weight_display}кг")
+    
+    seen = set()
+    result["items"] = []
+    for item in found_items:
+        if item.lower() not in seen:
+            seen.add(item.lower())
+            result["items"].append(item)
     
     # ===== ДАТА =====
-    days = {
+    days_map = {
         'пн': 'понедельник', 'понедельник': 'понедельник',
         'вт': 'вторник', 'вторник': 'вторник',
         'ср': 'среда', 'среда': 'среда', 'среду': 'среда',
@@ -363,7 +396,7 @@ def parse_order_text(text):
         'сегодня': 'сегодня', 'завтра': 'завтра'
     }
     
-    for key, val in days.items():
+    for key, val in days_map.items():
         if key in text_lower:
             result["date"] = val
             break
@@ -409,9 +442,15 @@ def format_order_message(order):
     date = order[5] if len(order) > 5 else "—"
     price = order[6] if len(order) > 6 and order[6] else "—"
     
+    # Кликабельный телефон
+    if phone and phone != "—":
+        phone_display = f"[{phone}](tel:+{phone})"
+    else:
+        phone_display = "—"
+    
     msg = f"📋 Заказ #{order_id}\n"
     msg += f"👤 {client}\n"
-    msg += f"📞 {phone}\n"
+    msg += f"📞 {phone_display}\n"
     msg += f"📦 {items}\n"
     msg += f"📅 {date}\n"
     msg += f"💰 {price}₽"
@@ -466,7 +505,7 @@ def handle_message(message):
             bot.send_message(chat_id, f"📅 Заказов на сегодня: {len(orders)}", reply_markup=main_menu())
             for o in orders:
                 msg = format_order_message(o)
-                bot.send_message(chat_id, msg, reply_markup=order_action_buttons(o[0]))
+                bot.send_message(chat_id, msg, reply_markup=order_action_buttons(o[0]), parse_mode='Markdown')
         return
     
     elif text == "📅 Завтра":
@@ -477,7 +516,7 @@ def handle_message(message):
             bot.send_message(chat_id, f"📅 Заказов на завтра: {len(orders)}", reply_markup=main_menu())
             for o in orders:
                 msg = format_order_message(o)
-                bot.send_message(chat_id, msg, reply_markup=order_action_buttons(o[0]))
+                bot.send_message(chat_id, msg, reply_markup=order_action_buttons(o[0]), parse_mode='Markdown')
         return
     
     elif text == "📋 Все активные":
@@ -488,7 +527,7 @@ def handle_message(message):
             bot.send_message(chat_id, f"📋 Всего активных: {len(orders)}", reply_markup=main_menu())
             for o in orders[:10]:
                 msg = format_order_message(o)
-                bot.send_message(chat_id, msg, reply_markup=order_action_buttons(o[0]))
+                bot.send_message(chat_id, msg, reply_markup=order_action_buttons(o[0]), parse_mode='Markdown')
             if len(orders) > 10:
                 bot.send_message(chat_id, f"... и ещё {len(orders)-10} заказов.")
         return
@@ -528,7 +567,7 @@ def handle_message(message):
             bot.send_message(chat_id, f"🔍 Найдено: {len(orders)}", reply_markup=main_menu())
             for o in orders[:10]:
                 msg = format_order_message(o)
-                bot.send_message(chat_id, msg, reply_markup=order_action_buttons(o[0]))
+                bot.send_message(chat_id, msg, reply_markup=order_action_buttons(o[0]), parse_mode='Markdown')
         else:
             bot.send_message(chat_id, "❌ Ничего не найдено.", reply_markup=main_menu())
         user_state[chat_id] = None
@@ -568,7 +607,7 @@ def handle_message(message):
             order = get_order_by_id(order_id)
             if order:
                 msg = format_order_message(order)
-                bot.send_message(chat_id, msg, reply_markup=order_action_buttons(order_id))
+                bot.send_message(chat_id, msg, reply_markup=order_action_buttons(order_id), parse_mode='Markdown')
         
         user_state[chat_id] = None
     
@@ -586,11 +625,17 @@ def handle_message(message):
                 
                 msg = f"✅ Заказ #{order_id} создан!\n\n"
                 msg += f"👤 {parsed['name']}\n"
-                msg += f"📞 {parsed['phone']}\n"
+                
+                # Кликабельный телефон в подтверждении
+                if parsed["phone"]:
+                    msg += f"📞 [{parsed['phone']}](tel:+{parsed['phone']})\n"
+                else:
+                    msg += f"📞 —\n"
+                    
                 msg += f"📅 {parsed['date']}\n"
                 msg += f"📦 {items_text}"
                 
-                bot.send_message(chat_id, msg, reply_markup=order_action_buttons(order_id))
+                bot.send_message(chat_id, msg, reply_markup=order_action_buttons(order_id), parse_mode='Markdown')
                 user_data[chat_id].pop("auto_name", None)
                 user_data[chat_id].pop("auto_phone", None)
                 user_data[chat_id].pop("auto_items", None)
@@ -600,11 +645,14 @@ def handle_message(message):
                 
                 msg = "📋 Распознан заказ:\n\n"
                 msg += f"👤 {parsed['name']}\n"
-                msg += f"📞 {parsed['phone']}\n"
+                if parsed["phone"]:
+                    msg += f"📞 [{parsed['phone']}](tel:+{parsed['phone']})\n"
+                else:
+                    msg += f"📞 —\n"
                 msg += f"📦 {items_text}\n\n"
                 msg += "📅 **Выберите дату выдачи:**"
                 
-                bot.send_message(chat_id, msg, reply_markup=kb)
+                bot.send_message(chat_id, msg, reply_markup=kb, parse_mode='Markdown')
         else:
             bot.send_message(
                 chat_id,
@@ -635,7 +683,7 @@ def handle_callback(call):
         order = get_order_by_id(order_id)
         if order:
             msg = format_order_message(order) + "\n\n✏️ Что изменить?"
-            bot.edit_message_text(msg, chat_id, call.message.message_id, reply_markup=edit_menu_buttons(order_id))
+            bot.edit_message_text(msg, chat_id, call.message.message_id, reply_markup=edit_menu_buttons(order_id), parse_mode='Markdown')
         else:
             bot.answer_callback_query(call.id, "Заказ не найден")
     
@@ -644,7 +692,7 @@ def handle_callback(call):
         order = get_order_by_id(order_id)
         if order:
             msg = format_order_message(order)
-            bot.edit_message_text(msg, chat_id, call.message.message_id, reply_markup=order_action_buttons(order_id))
+            bot.edit_message_text(msg, chat_id, call.message.message_id, reply_markup=order_action_buttons(order_id), parse_mode='Markdown')
         else:
             bot.answer_callback_query(call.id, "Заказ не найден")
     
@@ -748,11 +796,19 @@ def handle_callback(call):
             items = user_data[chat_id].get("auto_items", "")
             order_id = add_order(name, phone, items, display_date)
             
+            msg = f"✅ Заказ #{order_id} criado!\n\n"
+            msg += f"👤 {name}\n"
+            if phone:
+                msg += f"📞 [{phone}](tel:+{phone})\n"
+            else:
+                msg += f"📞 —\n"
+            msg += f"📦 {items}\n📅 {display_date}"
+            
             bot.edit_message_text(
-                f"✅ Заказ #{order_id} создан!\n\n"
-                f"👤 {name}\n📞 {phone}\n📦 {items}\n📅 {display_date}",
+                msg,
                 chat_id,
-                call.message.message_id
+                call.message.message_id,
+                parse_mode='Markdown'
             )
             user_data[chat_id].pop("auto_name", None)
             user_data[chat_id].pop("auto_phone", None)
@@ -767,7 +823,7 @@ def handle_callback(call):
                 order = get_order_by_id(order_id)
                 if order:
                     msg = format_order_message(order)
-                    bot.edit_message_text(msg, chat_id, call.message.message_id, reply_markup=order_action_buttons(order_id))
+                    bot.edit_message_text(msg, chat_id, call.message.message_id, reply_markup=order_action_buttons(order_id), parse_mode='Markdown')
             else:
                 bot.answer_callback_query(call.id, "❌ Ошибка")
             user_state[chat_id] = None
