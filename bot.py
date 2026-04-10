@@ -37,6 +37,9 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 SHEET_ID = os.getenv("SHEET_ID")
 GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDENTIALS")
 
+if not GOOGLE_CREDS_JSON:
+    raise ValueError("❌ GOOGLE_CREDENTIALS не задан в переменных окружения")
+
 # Загрузка админов
 ADMIN_ID = os.getenv("ADMIN_ID")
 ADMIN_IDS_STR = os.getenv("ADMIN_IDS", "")
@@ -76,14 +79,12 @@ user_data = {}
 def is_admin(message_or_call):
     if not ADMIN_IDS:
         return True
-    
     if hasattr(message_or_call, 'chat'):
         user_id = message_or_call.chat.id
     elif hasattr(message_or_call, 'message'):
         user_id = message_or_call.message.chat.id
     else:
         return False
-    
     return user_id in ADMIN_IDS
 
 # ==================== ГЛАВНОЕ МЕНЮ ====================
@@ -94,6 +95,30 @@ def main_menu():
     keyboard.row("📋 Все активные", "📊 Экспорт")
     return keyboard
 
+# ==================== ОЧИСТКА ТЕЛЕФОНА ====================
+def clean_phone(phone):
+    """Очищает телефон и возвращает красивый формат для отображения и tel-ссылку"""
+    if not phone:
+        return None
+    digits = re.sub(r'\D', '', phone)
+    if digits.startswith('80') and len(digits) >= 11:
+        digits = '375' + digits[2:]
+    elif digits.startswith('8') and len(digits) == 11:
+        digits = '7' + digits[1:]
+    if digits.startswith('375') and len(digits) == 12:
+        display = f"+{digits[:3]} {digits[3:5]} {digits[5:8]}-{digits[8:10]}-{digits[10:12]}"
+    elif digits.startswith('7') and len(digits) == 11:
+        display = f"+{digits[0]} {digits[1:4]} {digits[4:7]}-{digits[7:9]}-{digits[9:11]}"
+    else:
+        display = digits
+    return {'raw': digits, 'display': display, 'tel': f"+{digits}"}
+
+def format_phone_for_markdown(phone):
+    if not phone or phone == "—":
+        return "—"
+    info = clean_phone(phone)
+    return f"[{info['display']}](tel:{info['tel']})"
+
 # ==================== КАЛЕНДАРЬ ====================
 def get_calendar_keyboard(year=None, month=None):
     now = datetime.now()
@@ -101,16 +126,12 @@ def get_calendar_keyboard(year=None, month=None):
         year = now.year
     if month is None:
         month = now.month
-    
     month_names = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
                    'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь']
-    
     kb = types.InlineKeyboardMarkup(row_width=7)
     kb.add(types.InlineKeyboardButton(f"{month_names[month-1]} {year}", callback_data="ignore"))
-    
     days_row = [types.InlineKeyboardButton(d, callback_data="ignore") for d in ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс']]
     kb.add(*days_row)
-    
     cal = calendar.monthcalendar(year, month)
     for week in cal:
         row = []
@@ -121,27 +142,22 @@ def get_calendar_keyboard(year=None, month=None):
                 date_str = f"{year}-{month:02d}-{day:02d}"
                 row.append(types.InlineKeyboardButton(str(day), callback_data=f"calpick_{date_str}"))
         kb.add(*row)
-    
     prev_month = month - 1 if month > 1 else 12
     prev_year = year if month > 1 else year - 1
     next_month = month + 1 if month < 12 else 1
     next_year = year if month < 12 else year + 1
-    
     nav_row = [
         types.InlineKeyboardButton("<<", callback_data=f"cal_{prev_year}_{prev_month}"),
         types.InlineKeyboardButton(">>", callback_data=f"cal_{next_year}_{next_month}")
     ]
     kb.add(*nav_row)
-    
     today = now.strftime("%Y-%m-%d")
     tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%d")
-    
     quick_row = [
         types.InlineKeyboardButton("📅 Сегодня", callback_data=f"calpick_{today}"),
         types.InlineKeyboardButton("📅 Завтра", callback_data=f"calpick_{tomorrow}")
     ]
     kb.add(*quick_row)
-    
     return kb
 
 # ==================== РАБОТА С ТАБЛИЦЕЙ ====================
@@ -182,7 +198,7 @@ def get_all_orders():
 
 def update_order_field(order_id, field_col, value):
     try:
-        cell = sheet.find(str(order_id))
+        cell = sheet.find(str(order_id), in_column=1)
         if cell:
             sheet.update_cell(cell.row, field_col, str(value))
             return True
@@ -242,169 +258,128 @@ def export_orders_to_csv(orders):
     output.seek(0)
     return output.getvalue().encode('utf-8-sig')
 
-# ==================== ПАРСЕР v3.0 ====================
+# ==================== ПАРСЕР v4 ====================
 def parse_order_text(text):
-    """Парсер v3.0 - с правильной обработкой телефона и граммов"""
     result = {"name": "", "phone": "", "items": [], "date": None}
-    
+    confidence = 0
     text_clean = text.replace('\n', ' ').replace('\r', ' ').strip()
     text_lower = text_clean.lower()
+    text_lower = text_lower.replace("полкило", "0.5 кг").replace("пол кило", "0.5 кг").replace("полтора", "1.5")
+    text_lower = re.sub(r'([а-яёa-z])(\d)', r'\1 \2', text_lower)
+    text_lower = re.sub(r'(\d)([а-яёa-z])', r'\1 \2', text_lower)
     
-    # ===== ТЕЛЕФОН =====
-    all_digits = re.findall(r'\d+', text_clean)
-    
-    for digits in sorted(all_digits, key=len, reverse=True):
-        if 10 <= len(digits) <= 12:
-            result["phone"] = digits
-            text_clean = text_clean.replace(digits, '').strip()
-            text_lower = text_clean.lower()
-            break
-    
-    if not result["phone"]:
-        phone_patterns = [
-            r'(\+?\d[\d\s\-\(\)]{8,}\d)',
-            r'(\d[\d\s]{8,}\d)',
-        ]
-        for pattern in phone_patterns:
-            match = re.search(pattern, text_clean)
-            if match:
-                digits_only = re.sub(r'[^\d]', '', match.group(1))
-                if 10 <= len(digits_only) <= 12:
-                    result["phone"] = digits_only
-                    text_clean = text_clean.replace(match.group(1), '').strip()
-                    text_lower = text_clean.lower()
-                    break
-    
-    # ===== ИМЯ =====
-    text_for_name = re.sub(r'[^а-яёa-z\s]', ' ', text_lower, flags=re.IGNORECASE)
-    text_for_name = re.sub(r'\s+', ' ', text_for_name).strip()
-    
-    not_names = {
-        'ребра', 'рёбра', 'ребро', 'грудинка', 'грудника', 'грудинки',
-        'форель', 'форели', 'сало', 'сала', 'окорок', 'окорока',
-        'колбаса', 'колбасы', 'шейка', 'шейки', 'карбонад', 'буженина',
-        'кг', 'гр', 'г', 'грамм', 'килограмм',
-        'тел', 'телефон', 'заказ', 'хочу', 'возьми', 'положи',
-        'на', 'в', 'с', 'и', 'а', 'к', 'от', 'до', 'по', 'у',
-        'я', 'мне', 'меня'
+    product_map = {
+        'рёбра': 'Ребра', 'ребра': 'Ребра', 'ребро': 'Ребра',
+        'форели': 'Форель', 'форель': 'Форель',
+        'сала': 'Сало', 'сало': 'Сало',
+        'грудинки': 'Грудинка', 'грудинка': 'Грудинка',
+        'утка': 'Утка', 'утки': 'Утка',
+        'сумбрия': 'Скумбрия', 'скумбрия': 'Скумбрия', 'сумбрии': 'Скумбрия',
     }
     
-    words = text_for_name.split()
-    for word in words:
-        word_clean = word.strip('.,!?;:')
-        if len(word_clean) >= 2 and word_clean not in not_names:
-            result["name"] = word_clean.capitalize()
-            break
-    
-    if not result["name"]:
-        for word in words:
-            if not word.isdigit() and len(word) >= 2:
-                result["name"] = word.capitalize()
+    # Телефон
+    all_digits = re.findall(r'\d+', text_clean)
+    for digits in sorted(all_digits, key=len, reverse=True):
+        if 10 <= len(digits) <= 12:
+            if digits.startswith(('8', '7', '3')) or digits.startswith('80'):
+                phone_info = clean_phone(digits)
+                result["phone"] = phone_info['display']
+                result["phone_raw"] = phone_info['raw']
+                confidence += 1
+                text_clean = text_clean.replace(digits, '').strip()
+                text_lower = text_clean.lower()
                 break
     
+    if not result["phone"]:
+        phone_pattern = r'(\+?3?7?5?\s?\(?\d{2,3}\)?\s?\d{3}[\s\-]?\d{2}[\s\-]?\d{2})'
+        match = re.search(phone_pattern, text_clean)
+        if match:
+            digits_only = re.sub(r'\D', '', match.group(1))
+            if 10 <= len(digits_only) <= 12:
+                phone_info = clean_phone(digits_only)
+                result["phone"] = phone_info['display']
+                result["phone_raw"] = phone_info['raw']
+                confidence += 1
+                text_clean = text_clean.replace(match.group(1), '').strip()
+                text_lower = text_clean.lower()
+    
+    # Имя
+    not_names = {
+        'ребра', 'рёбра', 'форель', 'сало', 'грудинка', 'утка', 'сумбрия', 'скумбрия',
+        'кг', 'гр', 'г', 'тел', 'телефон', 'заказ', 'хочу', 'возьми', 'положи', 'закажи',
+        'на', 'в', 'с', 'и', 'а', 'к', 'от', 'до', 'по', 'у', 'я', 'мне'
+    }
+    words = text_lower.split()
+    if words:
+        first_word = words[0].strip('.,!?;:')
+        if first_word and first_word not in not_names and not first_word.isdigit():
+            result["name"] = first_word.capitalize()
+            confidence += 1
     if not result["name"]:
         result["name"] = "Клиент"
     
-    # ===== ПОЗИЦИИ =====
-    found_items = []
-    
-    def parse_weight(w_str, unit_hint=''):
+    # Позиции
+    found_items = {}
+    def parse_weight(w_str, unit=''):
         try:
             w_str = w_str.replace(',', '.')
             weight = float(w_str)
-            
-            unit_lower = unit_hint.lower() if unit_hint else ''
-            
-            if 'гр' in unit_lower or 'г' in unit_lower or 'gr' in unit_lower or 'g' in unit_lower:
-                if weight >= 50:
-                    weight = weight / 1000
-            elif weight > 100 and 'кг' not in text_lower and 'kg' not in text_lower:
+            if unit and ('гр' in unit or 'г' in unit or 'g' in unit):
                 weight = weight / 1000
-            
             return weight
         except:
             return None
     
-    pattern1 = re.compile(
-        r'([а-яёa-z]{2,})\s*[:\-\s]?\s*(\d+[\.\,]?\d*)\s*(кг|гр?|грамм|kg|g)?',
-        re.IGNORECASE
-    )
-    
+    pattern1 = re.compile(r'([а-яёa-z]{2,})\s*[:\-\s]?\s*(\d+[\.\,]?\d*)\s*(кг|гр?|g)?', re.IGNORECASE)
     for match in pattern1.finditer(text_lower):
         name = match.group(1).strip()
         weight_str = match.group(2).strip()
         unit = match.group(3) if match.group(3) else ''
-        
-        if name in ['тел', 'телефон', 'заказ', 'сегодня', 'завтра']:
+        if name in not_names and name not in product_map:
             continue
-        if name == result["name"].lower():
-            continue
-        
         weight = parse_weight(weight_str, unit)
         if weight is None:
             continue
-        
+        name_clean = product_map.get(name, name.capitalize())
         if weight == int(weight):
             weight_display = str(int(weight))
         else:
-            weight_display = str(weight).rstrip('0').rstrip('.') if '.' in str(weight) else str(weight)
-        
-        found_items.append(f"{name.capitalize()} {weight_display}кг")
+            weight_display = str(weight).rstrip('0').rstrip('.')
+        key = f"{name_clean}_{weight_display}"
+        found_items[key] = f"{name_clean} {weight_display}кг"
     
-    pattern2 = re.compile(
-        r'(\d+[\.\,]?\d*)\s*(кг|гр?|грамм|kg|g)?\s+([а-яёa-z]{2,})',
-        re.IGNORECASE
-    )
+    result["items"] = list(found_items.values())
+    if result["items"]:
+        confidence += 1
     
-    for match in pattern2.finditer(text_lower):
-        weight_str = match.group(1).strip()
-        unit = match.group(2) if match.group(2) else ''
-        name = match.group(3).strip()
-        
-        if name in ['тел', 'телефон', 'заказ']:
-            continue
-        if name == result["name"].lower():
-            continue
-        
-        weight = parse_weight(weight_str, unit)
-        if weight is None:
-            continue
-        
-        if weight == int(weight):
-            weight_display = str(int(weight))
-        else:
-            weight_display = str(weight).rstrip('0').rstrip('.') if '.' in str(weight) else str(weight)
-        
-        found_items.append(f"{name.capitalize()} {weight_display}кг")
+    # Дата
+    if "через" in text_lower:
+        match = re.search(r'через\s+(\d+)\s*д', text_lower)
+        if match:
+            days = int(match.group(1))
+            result["date"] = (datetime.now() + timedelta(days=days)).strftime("%d.%m")
+            confidence += 1
+    if not result["date"]:
+        days_map = {
+            'пн': 'понедельник', 'понедельник': 'понедельник', 'вт': 'вторник', 'вторник': 'вторник',
+            'ср': 'среда', 'среда': 'среда', 'среду': 'среда', 'чт': 'четверг', 'четверг': 'четверг',
+            'пт': 'пятница', 'пятница': 'пятница', 'пятницу': 'пятница',
+            'сб': 'суббота', 'суббота': 'суббота', 'субботу': 'суббота',
+            'вс': 'воскресенье', 'воскресенье': 'воскресенье',
+            'сегодня': 'сегодня', 'завтра': 'завтра'
+        }
+        for key, val in days_map.items():
+            if key in text_lower:
+                result["date"] = val
+                confidence += 1
+                break
+    if not result["date"]:
+        date_match = re.search(r'(\d{1,2}[\./-]\d{1,2})', text_clean)
+        if date_match:
+            result["date"] = date_match.group(1)
+            confidence += 1
     
-    seen = set()
-    result["items"] = []
-    for item in found_items:
-        if item.lower() not in seen:
-            seen.add(item.lower())
-            result["items"].append(item)
-    
-    # ===== ДАТА =====
-    days_map = {
-        'пн': 'понедельник', 'понедельник': 'понедельник',
-        'вт': 'вторник', 'вторник': 'вторник',
-        'ср': 'среда', 'среда': 'среда', 'среду': 'среда',
-        'чт': 'четверг', 'четверг': 'четверг',
-        'пт': 'пятница', 'пятница': 'пятница', 'пятницу': 'пятница',
-        'сб': 'суббота', 'суббота': 'суббота', 'субботу': 'суббота',
-        'вс': 'воскресенье', 'воскресенье': 'воскресенье',
-        'сегодня': 'сегодня', 'завтра': 'завтра'
-    }
-    
-    for key, val in days_map.items():
-        if key in text_lower:
-            result["date"] = val
-            break
-    
-    date_match = re.search(r'(\d{1,2}[\./-]\d{1,2}(?:[\./-]\d{2,4})?)', text_clean)
-    if date_match:
-        result["date"] = date_match.group(1)
-    
+    result["confidence"] = confidence
     return result
 
 # ==================== КНОПКИ ====================
@@ -430,7 +405,7 @@ def edit_menu_buttons(order_id):
         types.InlineKeyboardButton("💰 Сумма", callback_data=f"editprice_{order_id}")
     )
     kb.add(
-        types.InlineKeyboardButton("🔙 Назад", callback_data=f"backto_{order_id}")
+        types.InlineKeyboardButton("✅ Готово", callback_data=f"backto_{order_id}")
     )
     return kb
 
@@ -442,19 +417,28 @@ def format_order_message(order):
     date = order[5] if len(order) > 5 else "—"
     price = order[6] if len(order) > 6 and order[6] else "—"
     
-    # Кликабельный телефон
-    if phone and phone != "—":
-        phone_display = f"[{phone}](tel:+{phone})"
-    else:
-        phone_display = "—"
-    
     msg = f"📋 Заказ #{order_id}\n"
     msg += f"👤 {client}\n"
-    msg += f"📞 {phone_display}\n"
+    msg += f"📞 {format_phone_for_markdown(phone)}\n"
     msg += f"📦 {items}\n"
     msg += f"📅 {date}\n"
     msg += f"💰 {price}₽"
     return msg
+
+def create_order_from_parsed(chat_id, parsed):
+    items_text = ", ".join(parsed["items"]) if parsed["items"] else "Не указано"
+    date = parsed["date"] if parsed["date"] else "сегодня"
+    phone_raw = parsed.get("phone_raw", parsed["phone"])
+    order_id = add_order(parsed["name"], phone_raw, items_text, date)
+    
+    msg = f"✅ Заказ #{order_id} создан!\n\n"
+    msg += f"👤 {parsed['name']}\n"
+    msg += f"📞 {format_phone_for_markdown(phone_raw)}\n"
+    msg += f"📦 {items_text}\n"
+    msg += f"📅 {date}"
+    
+    bot.send_message(chat_id, msg, reply_markup=order_action_buttons(order_id), parse_mode='Markdown')
+    return order_id
 
 # ==================== ОБРАБОТЧИКИ ====================
 @bot.message_handler(commands=['start'])
@@ -584,8 +568,9 @@ def handle_message(message):
                 else:
                     bot.send_message(chat_id, "❌ Ошибка")
             elif field == "PHONE":
-                if update_phone(order_id, text):
-                    bot.send_message(chat_id, f"✅ Телефон изменён на {text}")
+                phone_info = clean_phone(text)
+                if phone_info and update_phone(order_id, phone_info['raw']):
+                    bot.send_message(chat_id, f"✅ Телефон изменён на {phone_info['display']}")
                 else:
                     bot.send_message(chat_id, "❌ Ошибка")
             elif field == "ITEMS":
@@ -615,44 +600,26 @@ def handle_message(message):
         parsed = parse_order_text(text)
         
         if parsed["phone"] or parsed["items"]:
-            user_data[chat_id]["auto_name"] = parsed["name"]
-            user_data[chat_id]["auto_phone"] = parsed["phone"]
-            items_text = ", ".join(parsed["items"]) if parsed["items"] else "Не указано"
-            user_data[chat_id]["auto_items"] = items_text
+            confidence = parsed.get("confidence", 0)
+            user_data[chat_id]["pending_parsed"] = parsed
             
-            if parsed["date"]:
-                order_id = add_order(parsed["name"], parsed["phone"], items_text, parsed["date"])
-                
-                msg = f"✅ Заказ #{order_id} создан!\n\n"
+            if confidence < 2:
+                msg = "⚠️ Проверьте заказ:\n\n"
                 msg += f"👤 {parsed['name']}\n"
+                msg += f"📞 {parsed['phone'] or '—'}\n"
+                msg += f"📦 {', '.join(parsed['items']) if parsed['items'] else '—'}\n"
+                msg += f"📅 {parsed['date'] or 'не указана'}\n\n"
+                msg += "Всё верно?"
                 
-                # Кликабельный телефон в подтверждении
-                if parsed["phone"]:
-                    msg += f"📞 [{parsed['phone']}](tel:+{parsed['phone']})\n"
-                else:
-                    msg += f"📞 —\n"
-                    
-                msg += f"📅 {parsed['date']}\n"
-                msg += f"📦 {items_text}"
-                
-                bot.send_message(chat_id, msg, reply_markup=order_action_buttons(order_id), parse_mode='Markdown')
-                user_data[chat_id].pop("auto_name", None)
-                user_data[chat_id].pop("auto_phone", None)
-                user_data[chat_id].pop("auto_items", None)
+                kb = types.InlineKeyboardMarkup()
+                kb.row(
+                    types.InlineKeyboardButton("✅ Да, создать", callback_data="confirm_yes"),
+                    types.InlineKeyboardButton("✏️ Исправить", callback_data="confirm_edit")
+                )
+                bot.send_message(chat_id, msg, reply_markup=kb)
             else:
-                user_state[chat_id] = "WAIT_AUTO_DATE"
-                kb = get_calendar_keyboard()
-                
-                msg = "📋 Распознан заказ:\n\n"
-                msg += f"👤 {parsed['name']}\n"
-                if parsed["phone"]:
-                    msg += f"📞 [{parsed['phone']}](tel:+{parsed['phone']})\n"
-                else:
-                    msg += f"📞 —\n"
-                msg += f"📦 {items_text}\n\n"
-                msg += "📅 **Выберите дату выдачи:**"
-                
-                bot.send_message(chat_id, msg, reply_markup=kb, parse_mode='Markdown')
+                create_order_from_parsed(chat_id, parsed)
+                user_data[chat_id].pop("pending_parsed", None)
         else:
             bot.send_message(
                 chat_id,
@@ -695,6 +662,7 @@ def handle_callback(call):
             bot.edit_message_text(msg, chat_id, call.message.message_id, reply_markup=order_action_buttons(order_id), parse_mode='Markdown')
         else:
             bot.answer_callback_query(call.id, "Заказ не найден")
+        user_state[chat_id] = None
     
     elif data.startswith("editname_"):
         order_id = data.split("_")[1]
@@ -722,9 +690,21 @@ def handle_callback(call):
         user_state[chat_id] = f"EDIT_PRICE_{order_id}"
         bot.edit_message_text("💰 Введите новую сумму:", chat_id, call.message.message_id)
     
+    elif data == "confirm_yes":
+        parsed = user_data.get(chat_id, {}).get("pending_parsed")
+        if parsed:
+            create_order_from_parsed(chat_id, parsed)
+            user_data[chat_id].pop("pending_parsed", None)
+            bot.edit_message_text("✅ Заказ создан!", chat_id, call.message.message_id)
+        else:
+            bot.edit_message_text("❌ Данные утеряны.", chat_id, call.message.message_id)
+    
+    elif data == "confirm_edit":
+        bot.edit_message_text("✏️ Отправьте исправленный текст заказа:", chat_id, call.message.message_id)
+        user_state[chat_id] = "WAIT_MANUAL_EDIT"
+    
     elif data.startswith("export_"):
         period = data.split("_")[1]
-        
         if period == "сегодня":
             orders = get_orders_by_date("сегодня")
             filename = "заказы_сегодня.csv"
@@ -743,11 +723,7 @@ def handle_callback(call):
         
         if orders:
             csv_data = export_orders_to_csv(orders)
-            bot.send_document(
-                chat_id,
-                (filename, csv_data),
-                caption=f"📊 Экспорт: {len(orders)} заказов"
-            )
+            bot.send_document(chat_id, (filename, csv_data), caption=f"📊 Экспорт: {len(orders)} заказов")
             bot.answer_callback_query(call.id, "✅ Файл готов!")
         else:
             bot.answer_callback_query(call.id, "📭 Нет заказов за этот период.")
@@ -777,44 +753,25 @@ def handle_callback(call):
         if state == "WAIT_DATE":
             name = user_data[chat_id].get("new_name", "")
             phone = user_data[chat_id].get("new_phone", "")
+            phone_clean = clean_phone(phone)['raw'] if phone else ""
             items = user_data[chat_id].get("new_items", "")
-            order_id = add_order(name, phone, items, display_date)
+            order_id = add_order(name, phone_clean, items, display_date)
             
-            bot.edit_message_text(
-                f"✅ Заказ #{order_id} создан!\n\n"
-                f"👤 {name}\n📞 {phone}\n📦 {items}\n📅 {display_date}",
-                chat_id,
-                call.message.message_id
-            )
+            msg = f"✅ Заказ #{order_id} создан!\n\n"
+            msg += f"👤 {name}\n📞 {format_phone_for_markdown(phone_clean)}\n📦 {items}\n📅 {display_date}"
+            bot.edit_message_text(msg, chat_id, call.message.message_id, parse_mode='Markdown')
+            bot.send_message(chat_id, "Готово!", reply_markup=main_menu())
             user_state[chat_id] = None
             user_data[chat_id] = {}
-            bot.send_message(chat_id, "Готово!", reply_markup=main_menu())
         
         elif state == "WAIT_AUTO_DATE":
-            name = user_data[chat_id].get("auto_name", "")
-            phone = user_data[chat_id].get("auto_phone", "")
-            items = user_data[chat_id].get("auto_items", "")
-            order_id = add_order(name, phone, items, display_date)
-            
-            msg = f"✅ Заказ #{order_id} criado!\n\n"
-            msg += f"👤 {name}\n"
-            if phone:
-                msg += f"📞 [{phone}](tel:+{phone})\n"
-            else:
-                msg += f"📞 —\n"
-            msg += f"📦 {items}\n📅 {display_date}"
-            
-            bot.edit_message_text(
-                msg,
-                chat_id,
-                call.message.message_id,
-                parse_mode='Markdown'
-            )
-            user_data[chat_id].pop("auto_name", None)
-            user_data[chat_id].pop("auto_phone", None)
-            user_data[chat_id].pop("auto_items", None)
+            parsed = user_data[chat_id].get("pending_parsed", {})
+            if parsed:
+                parsed["date"] = display_date
+                create_order_from_parsed(chat_id, parsed)
+                user_data[chat_id].pop("pending_parsed", None)
+                bot.edit_message_text("✅ Заказ создан!", chat_id, call.message.message_id)
             user_state[chat_id] = None
-            bot.send_message(chat_id, "Готово!", reply_markup=main_menu())
         
         elif state and state.startswith("EDIT_DATE_"):
             order_id = state.split("_")[2]
