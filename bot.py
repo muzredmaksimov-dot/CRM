@@ -99,7 +99,6 @@ def main_menu():
 
 # ==================== ОЧИСТКА ТЕЛЕФОНА ====================
 def clean_phone(phone):
-    """Очищает телефон и возвращает красивый формат для отображения и tel-ссылку"""
     if not phone:
         return None
     digits = re.sub(r'\D', '', phone)
@@ -273,9 +272,9 @@ def export_orders_to_csv(orders):
     output.seek(0)
     return output.getvalue().encode('utf-8-sig')
 
-# ==================== ПАРСЕР v5 ====================
+# ==================== ПАРСЕР v6 — ФИНАЛЬНЫЙ ====================
 def parse_order_text(text):
-    """Парсер v5 — с поиском имени в любом месте и игнорированием вежливых фраз"""
+    """Парсер v6 — с расширенными словарями имён и продуктов"""
     result = {"name": "", "phone": "", "items": [], "date": None}
     confidence = 0
     text_clean = text.replace('\n', ' ').replace('\r', ' ').strip()
@@ -292,21 +291,101 @@ def parse_order_text(text):
     text_lower = re.sub(r'\s+', ' ', text_lower).strip()
     text_clean = text_lower
     
-    # Замены
-    text_lower = text_lower.replace("полкило", "0.5 кг").replace("пол кило", "0.5 кг").replace("полтора", "1.5")
+    # Замены для веса
+    text_lower = text_lower.replace("полкило", "0.5 кг")
+    text_lower = text_lower.replace("пол кило", "0.5 кг")
+    text_lower = text_lower.replace("полтора", "1.5")
+    text_lower = text_lower.replace("килограм", "1 кг")
+    text_lower = text_lower.replace("кило", "1 кг")
+    text_lower = text_lower.replace("кг", " кг ")
+    text_lower = re.sub(r'\s+', ' ', text_lower).strip()
+    
+    # Убираем обозначения посола
     text_lower = text_lower.replace("с/с", "").replace("с/сл", "").replace("сл/с", "")
+    text_lower = text_lower.replace("г/к", "").replace("х/к", "").replace("хк", "")
+    
+    # Разделяем слипшиеся слова
     text_lower = re.sub(r'([а-яёa-z])(\d)', r'\1 \2', text_lower)
     text_lower = re.sub(r'(\d)([а-яёa-z])', r'\1 \2', text_lower)
     
-    # Расширенный словарь продуктов
+    # ===== РАСШИРЕННЫЙ СЛОВАРЬ ИМЁН =====
+    known_names = {
+        # Мужские
+        'андрей', 'андрюша', 'андрейка', 'сергей', 'серёжа', 'серега', 'серж',
+        'александр', 'саша', 'саня', 'шура', 'алекс', 'дмитрий', 'дима', 'димон', 'митя',
+        'владимир', 'вова', 'володя', 'влад', 'алексей', 'алёша', 'лёша', 'лёха',
+        'иван', 'ваня', 'ванюша', 'максим', 'макс', 'никита', 'никитос', 'ник',
+        'руслан', 'рус', 'русик', 'артём', 'артем', 'тёма', 'денис', 'ден',
+        'кирилл', 'киря', 'павел', 'паша', 'михаил', 'миша', 'евгений', 'женя',
+        'игорь', 'игорёк', 'олег', 'олежка', 'юрий', 'юра', 'виктор', 'витя',
+        'николай', 'коля', 'василий', 'вася', 'пётр', 'петр', 'петя',
+        'антон', 'тоха', 'владислав', 'владик', 'вячеслав', 'слава', 'станислав', 'стас',
+        'константин', 'костя', 'роман', 'рома', 'илья', 'илюха', 'даниил', 'даня',
+        'матвей', 'тимофей', 'тима', 'егор', 'степан', 'стёпа', 'семён', 'семен', 'сёма',
+        'арсений', 'арсен', 'богдан', 'бодя', 'захар', 'геннадий', 'гена',
+        'григорий', 'гриша', 'леонид', 'лёня', 'валентин', 'валя', 'валерий', 'валера',
+        'анатолий', 'толя', 'борис', 'боря', 'эдуард', 'эдик', 'альберт', 'алик',
+        'артур', 'марат', 'рустам', 'тимур', 'рамиль', 'рафаэль', 'ренат',
+        # Женские
+        'маша', 'мария', 'маруся', 'оля', 'ольга', 'олечка', 'анна', 'аня', 'анюта',
+        'елена', 'лена', 'ленок', 'наталья', 'наташа', 'ната', 'татьяна', 'таня', 'танюша',
+        'екатерина', 'катя', 'катюша', 'ирина', 'ира', 'ирочка', 'юлия', 'юля', 'юлька',
+        'светлана', 'света', 'дарья', 'даша', 'анастасия', 'настя', 'виктория', 'вика',
+        'ксения', 'ксюша', 'елизавета', 'лиза', 'александра', 'сашенька', 'марина', 'мариша',
+        'людмила', 'люда', 'галина', 'галя', 'надежда', 'надя', 'вера', 'верочка',
+        'любовь', 'люба', 'тамара', 'тома', 'валентина', 'валя', 'лариса', 'лара',
+        'нина', 'алла', 'софия', 'соня', 'софья', 'маргарита', 'рита', 'вероника', 'ника',
+        'кристина', 'кристи', 'диана', 'ангелина', 'геля', 'алина', 'алинка',
+        'полина', 'поля', 'арина', 'ариша', 'милана', 'мила', 'эльвира', 'эля',
+        'регина', 'оксана', 'снежана', 'владислава', 'влада', 'яна', 'эмма', 'эвелина', 'эва',
+    }
+    
+    # ===== ПОЛНЫЙ СЛОВАРЬ ПРОДУКТОВ =====
     product_map = {
-        'рёбра': 'Ребра', 'ребра': 'Ребра', 'ребро': 'Ребра',
-        'форели': 'Форель', 'форель': 'Форель',
-        'сала': 'Сало', 'сало': 'Сало',
-        'грудинки': 'Грудинка', 'грудинка': 'Грудинка',
-        'утка': 'Утка', 'утки': 'Утка',
-        'сумбрия': 'Скумбрия', 'скумбрия': 'Скумбрия',
-        'балык': 'Балык', 'балыка': 'Балык',
+        # Грудинка
+        'грудинка': 'Грудинка г/к', 'грудинки': 'Грудинка г/к', 'грудинку': 'Грудинка г/к',
+        'грудинка гк': 'Грудинка г/к', 'грудинка г/к': 'Грудинка г/к',
+        # Корейка
+        'корейка': 'Корейка на кости г/к', 'корейки': 'Корейка на кости г/к',
+        'корейка на кости': 'Корейка на кости г/к',
+        # Индейка
+        'филе индейки': 'Филе индейки', 'индейка филе': 'Филе индейки',
+        'бедро индейки': 'Бедро индейки', 'бедра индейки': 'Бедро индейки',
+        # Утка
+        'утка': 'Филе домашней утки', 'утки': 'Филе домашней утки',
+        'филе утки': 'Филе домашней утки', 'домашняя утка': 'Филе домашней утки',
+        # Закуски
+        'закуска': 'Закуска из ушей с языком', 'закуска из ушей': 'Закуска из ушей с языком',
+        'уши': 'Закуска из ушей с языком', 'уши с языком': 'Закуска из ушей с языком',
+        # Сосиски
+        'сосиски': 'Сосиски сливочные', 'сосиски сливочные': 'Сосиски сливочные',
+        # Сервелат
+        'сервелат': 'Сервелат (свин/гов)', 'сервелат свингов': 'Сервелат (свин/гов)',
+        # Ветчина
+        'ветчина': 'Ветчина балыковая', 'ветчина балыковая': 'Ветчина балыковая',
+        # Балык
+        'балык': 'Балык', 'балыка': 'Балык', 'балька': 'Балык', 'балычок': 'Балык',
+        'балык хк': 'Балык х/к', 'балык х/к': 'Балык х/к',
+        'балык сс': 'Балык с/с', 'балык с/с': 'Балык с/с',
+        'блык': 'Балык',
+        # Рулеты
+        'рулет': 'Рулет', 'рулет трио': 'Рулет трио',
+        'рулет из форели': 'Рулет из форели с/с', 'трио': 'Рулет трио',
+        # Рыба
+        'скумбрия': 'Скумбрия х/к', 'скумбрии': 'Скумбрия х/к',
+        'скумбрия хк': 'Скумбрия х/к', 'скумбрия х/к': 'Скумбрия х/к',
+        'селёдка': 'Селёдка Исландия', 'селедка': 'Селёдка Исландия',
+        'сельдь': 'Селёдка Исландия', 'исландия': 'Селёдка Исландия',
+        'форель': 'Форель', 'форели': 'Форель', 'юкола': 'Юкола',
+        # Колбасы
+        'колбаса': 'Колбаса', 'колбаса форель': 'Колбаса форель/креветка',
+        'колбаса креветка': 'Колбаса форель/креветка',
+        'мини колбаски': 'Мини колбаски 3 вида', 'колбаски': 'Мини колбаски 3 вида',
+        # Пресерва
+        'пресерва': 'Пресерва форель с/с', 'пресервы': 'Пресерва форель с/с',
+        'пресерва форель': 'Пресерва форель с/с',
+        # Универсальные
+        'рёбра': 'Ребра', 'ребра': 'Ребра', 'сала': 'Сало', 'сало': 'Сало',
     }
     
     # Телефон
@@ -323,18 +402,9 @@ def parse_order_text(text):
                     text_lower = text_clean.lower()
                     break
     
-    # Имя — ищем в любом месте
-    not_names = {
-        'ребра', 'рёбра', 'форель', 'сало', 'грудинка', 'утка', 'сумбрия', 'скумбрия', 'балык',
-        'кг', 'гр', 'г', 'тел', 'телефон', 'заказ', 'на', 'в', 'с', 'и', 'а', 'к', 'от', 'до', 'по', 'у'
-    }
-    
-    known_names = {'маша', 'мария', 'андрей', 'оля', 'ольга', 'дима', 'дмитрий', 
-                   'саша', 'александр', 'лена', 'елена', 'наташа', 'наталья',
-                   'сергей', 'иван', 'анна', 'татьяна', 'таня', 'катя', 'екатерина'}
-    
     words = text_lower.split()
     
+    # Ищем известное имя
     for word in words:
         word_clean = word.strip('.,!?;:')
         if word_clean in known_names:
@@ -342,35 +412,38 @@ def parse_order_text(text):
             confidence += 1
             break
     
-    if not result["name"]:
-        for word in words:
-            word_clean = word.strip('.,!?;:')
-            if 2 <= len(word_clean) <= 5 and word_clean not in not_names and not word_clean.isdigit():
-                is_product_part = False
-                for prod in product_map:
-                    if word_clean in prod:
-                        is_product_part = True
-                        break
-                if not is_product_part:
-                    result["name"] = word_clean.capitalize()
-                    confidence += 1
+    # Если не нашли — берём последнее слово
+    not_names = {'кг', 'гр', 'г', 'тел', 'телефон', 'заказ', 'на', 'в', 'с', 'и', 'а', 'к', 'от', 'до', 'по', 'у'}
+    if not result["name"] and len(words) > 0:
+        last_word = words[-1].strip('.,!?;:')
+        if 2 <= len(last_word) <= 7 and last_word not in not_names and not last_word.isdigit():
+            is_product = False
+            for prod in product_map:
+                if last_word in prod:
+                    is_product = True
                     break
+            if not is_product:
+                result["name"] = last_word.capitalize()
+                confidence += 1
     
     if not result["name"]:
         result["name"] = "Клиент"
     
     # Позиции
     found_items = {}
+    
     def parse_weight(w_str, unit=''):
         try:
             w_str = w_str.replace(',', '.')
             weight = float(w_str)
             if unit and ('гр' in unit or 'г' in unit or 'g' in unit):
-                weight = weight / 1000
+                if weight >= 50:
+                    weight = weight / 1000
             return weight
         except:
             return None
     
+    # Паттерн 1: продукт + число
     pattern1 = re.compile(r'([а-яёa-z]{2,})\s*[:\-\s]?\s*(\d+[\.\,]?\d*)\s*(кг|гр?|g)?', re.IGNORECASE)
     for match in pattern1.finditer(text_lower):
         name = match.group(1).strip()
@@ -385,13 +458,16 @@ def parse_order_text(text):
             continue
         
         name_clean = product_map.get(name, name.capitalize())
+        
         if weight == int(weight):
             weight_display = str(int(weight))
         else:
             weight_display = str(weight).rstrip('0').rstrip('.')
+        
         key = f"{name_clean}_{weight_display}"
         found_items[key] = f"{name_clean} {weight_display}кг"
     
+    # Паттерн 2: число + продукт
     pattern2 = re.compile(r'(\d+[\.\,]?\d*)\s*(кг|гр?|g)?\s+([а-яёa-z]{2,})', re.IGNORECASE)
     for match in pattern2.finditer(text_lower):
         weight_str = match.group(1).strip()
@@ -406,10 +482,12 @@ def parse_order_text(text):
             continue
         
         name_clean = product_map.get(name, name.capitalize())
+        
         if weight == int(weight):
             weight_display = str(int(weight))
         else:
             weight_display = str(weight).rstrip('0').rstrip('.')
+        
         key = f"{name_clean}_{weight_display}"
         found_items[key] = f"{name_clean} {weight_display}кг"
     
@@ -424,6 +502,7 @@ def parse_order_text(text):
             days = int(match.group(1))
             result["date"] = (datetime.now() + timedelta(days=days)).strftime("%d.%m")
             confidence += 1
+    
     if not result["date"]:
         days_map = {
             'пн': 'понедельник', 'понедельник': 'понедельник', 'вт': 'вторник', 'вторник': 'вторник',
@@ -438,6 +517,7 @@ def parse_order_text(text):
                 result["date"] = val
                 confidence += 1
                 break
+    
     if not result["date"]:
         date_match = re.search(r'(\d{1,2}[\./-]\d{1,2})', text_clean)
         if date_match:
@@ -506,7 +586,7 @@ def create_order_from_parsed(chat_id, parsed, order_type="Самовывоз"):
     msg += f"📞 {format_phone_for_markdown(phone_raw)}\n"
     msg += f"📦 {items_text}\n"
     msg += f"📅 {date}\n"
-    msg += f"🚶 Самовывоз"
+    msg += f"{'🚶' if order_type == 'Самовывоз' else '🚚'} {order_type}"
     
     bot.send_message(chat_id, msg, reply_markup=order_action_buttons(order_id), parse_mode='Markdown')
     return order_id
@@ -689,7 +769,6 @@ def handle_message(message):
                 )
                 bot.send_message(chat_id, msg, reply_markup=kb)
             else:
-                # Запрашиваем тип заказа
                 kb = types.InlineKeyboardMarkup(row_width=2)
                 kb.add(
                     types.InlineKeyboardButton("🚶 Самовывоз", callback_data="type_Самовывоз"),
@@ -867,7 +946,6 @@ def handle_callback(call):
             phone_clean = clean_phone(phone)['raw'] if phone else ""
             items = user_data[chat_id].get("new_items", "")
             
-            # Сохраняем данные и запрашиваем тип
             user_data[chat_id]["temp_name"] = name
             user_data[chat_id]["temp_phone"] = phone_clean
             user_data[chat_id]["temp_items"] = items
@@ -927,7 +1005,6 @@ def handle_callback(call):
         bot.edit_message_text(msg, chat_id, call.message.message_id, parse_mode='Markdown')
         bot.send_message(chat_id, "Готово!", reply_markup=main_menu())
         
-        # Очищаем временные данные
         for key in ["temp_name", "temp_phone", "temp_items", "temp_date"]:
             user_data[chat_id].pop(key, None)
         user_state[chat_id] = None
@@ -937,19 +1014,16 @@ def handle_callback(call):
 
 # ==================== ЗАПУСК ====================
 def main():
-    # Очищаем старые сессии Telegram API
     try:
         requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true", timeout=5)
         logger.info("✅ Старые вебхуки и pending updates очищены")
     except Exception as e:
         logger.warning(f"⚠️ Не удалось очистить вебхуки: {e}")
     
-    # Запускаем веб-сервер в отдельном потоке
     threading.Thread(target=run_web_server, daemon=True).start()
     logger.info("🌐 Веб-сервер запущен")
     logger.info("🤖 Бот запущен...")
     
-    # Бесконечный цикл с переподключением при ошибке
     while True:
         try:
             bot.polling(none_stop=True)
