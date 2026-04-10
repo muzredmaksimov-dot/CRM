@@ -55,7 +55,6 @@ if ADMIN_IDS_STR:
         except:
             pass
 
-# Убираем дубликаты
 ADMIN_IDS = list(set(ADMIN_IDS))
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -75,9 +74,8 @@ user_data = {}
 
 # ==================== ПРОВЕРКА АДМИНА ====================
 def is_admin(message_or_call):
-    """Проверяет, является ли пользователь админом"""
     if not ADMIN_IDS:
-        return True  # Если список пуст — разрешаем всем (для теста)
+        return True
     
     if hasattr(message_or_call, 'chat'):
         user_id = message_or_call.chat.id
@@ -233,100 +231,144 @@ def get_orders_by_date(date_str):
 
 # ==================== ЭКСПОРТ В CSV ====================
 def export_orders_to_csv(orders):
-    """Создаёт CSV-файл из списка заказов"""
     output = io.StringIO()
     writer = csv.writer(output, delimiter=';')
-    
     writer.writerow(['ID', 'Создан', 'Клиент', 'Телефон', 'Позиции', 'Дата выдачи', 'Сумма', 'Статус'])
-    
     for order in orders:
         row = order[:8]
         while len(row) < 8:
             row.append("")
         writer.writerow(row)
-    
     output.seek(0)
     return output.getvalue().encode('utf-8-sig')
 
-# ==================== ПАРСЕР ====================
+# ==================== ИСПРАВЛЕННЫЙ ПАРСЕР ====================
 def parse_order_text(text):
+    """Исправленный парсер для кривых сообщений"""
     result = {"name": "", "phone": "", "items": [], "date": None}
     
-    text_lower = text.lower()
     text_clean = text.replace('\n', ' ').replace('\r', ' ')
+    text_lower = text_clean.lower()
     
+    # ===== ТЕЛЕФОН =====
     phone_digits = re.sub(r'[^\d]', '', text_clean)
     phone_match = re.search(r'(\d{10,12})', phone_digits)
     if phone_match:
         result["phone"] = phone_match.group(1)
-        text_clean = re.sub(r'[\+\d\s\(\)\-]{10,}', '', text_clean)
+        text_clean = re.sub(r'[\+\d\s\(\)\-]{10,}', ' ', text_clean)
+        text_clean = re.sub(r'\s+', ' ', text_clean).strip()
+        text_lower = text_clean.lower()
     
-    not_names = {'ребра', 'рёбра', 'ребро', 'грудинка', 'грудника', 'грудинки',
-                 'форель', 'форели', 'сало', 'сала', 'окорок', 'окорока',
-                 'колбаса', 'колбасы', 'кг', 'гр', 'грамм', 'тел', 'телефон',
-                 'заказ', 'хочу', 'возьми', 'положи', 'на', 'в', 'с', 'и', 'а'}
+    # ===== ИМЯ =====
+    not_names = {
+        'ребра', 'рёбра', 'ребро', 'грудинка', 'грудника', 'грудинки',
+        'форель', 'форели', 'сало', 'сала', 'окорок', 'окорока',
+        'колбаса', 'колбасы', 'кг', 'гр', 'грамм', 'тел', 'телефон',
+        'заказ', 'хочу', 'возьми', 'положи', 'на', 'в', 'с', 'и', 'а',
+        'к', 'г'
+    }
     
     words = text_clean.split()
+    
     for word in words:
         word_clean = re.sub(r'[^\w]', '', word)
         if len(word_clean) >= 2 and word_clean.lower() not in not_names:
-            if word[0].isupper() or (word_clean and word_clean[0].isupper()):
+            if not word_clean.replace('.', '').replace(',', '').isdigit():
                 result["name"] = word_clean.capitalize()
                 break
     
     if not result["name"]:
         for word in words:
             word_clean = re.sub(r'[^\w]', '', word)
-            if len(word_clean) >= 2 and word_clean.lower() not in not_names:
+            if len(word_clean) >= 2 and not word_clean.replace('.', '').replace(',', '').isdigit():
                 result["name"] = word_clean.capitalize()
                 break
     
     if not result["name"]:
         result["name"] = "Клиент"
     
+    # ===== ПОЗИЦИИ =====
     def fix_comma(s):
         return re.sub(r'(\d+),(\d+)', r'\1.\2', s)
     
     text_fixed = fix_comma(text_lower)
-    
-    item_pattern = re.compile(r'([а-яё]{2,})\s*[:\-\s]?\s*(\d+[\.\,]?\d*)\s*(?:кг|гр|г|kg|gr)?', re.IGNORECASE)
-    item_pattern_reverse = re.compile(r'(\d+[\.\,]?\d*)\s*(?:кг|гр|г|kg|gr)?\s+([а-яё]{2,})', re.IGNORECASE)
-    
     found_items = []
-    for match in item_pattern.finditer(text_fixed):
+    
+    # Паттерн 1: "продукт 0,5кг"
+    item_pattern1 = re.compile(
+        r'([а-яёa-z]{2,})\s*[:\-\s]?\s*(\d+[\.\,]?\d*)\s*(?:кг|гр?|грамм|kg|g)?',
+        re.IGNORECASE
+    )
+    
+    for match in item_pattern1.finditer(text_fixed):
         name = match.group(1).strip()
         weight = match.group(2).strip().replace(',', '.')
-        if name in ['тел', 'телефон', 'заказ', 'сегодня', 'завтра', 'пятница']:
+        
+        if name.lower() in ['тел', 'телефон', 'заказ', 'сегодня', 'завтра', 'пятница', result["name"].lower()]:
             continue
+        
+        match_text = match.group(0).lower()
+        if 'гр' in match_text or ' г ' in match_text or match_text.endswith('г'):
+            weight_val = float(weight)
+            if weight_val >= 100:
+                weight = str(weight_val / 1000)
+        
         found_items.append(f"{name.capitalize()} {weight}кг")
     
-    for match in item_pattern_reverse.finditer(text_fixed):
+    # Паттерн 2: "200гр форели"
+    item_pattern2 = re.compile(
+        r'(\d+[\.\,]?\d*)\s*(?:кг|гр?|грамм|kg|g)?\s+([а-яёa-z]{2,})',
+        re.IGNORECASE
+    )
+    
+    for match in item_pattern2.finditer(text_fixed):
         weight = match.group(1).strip().replace(',', '.')
         name = match.group(2).strip()
-        if name in ['тел', 'телефон', 'заказ', 'сегодня', 'завтра']:
+        
+        if name.lower() in ['тел', 'телефон', 'заказ', 'сегодня', 'завтра', result["name"].lower()]:
             continue
+        
+        match_text = match.group(0).lower()
+        if 'гр' in match_text or ' г ' in match_text:
+            weight_val = float(weight)
+            if weight_val >= 100:
+                weight = str(weight_val / 1000)
+        
         found_items.append(f"{name.capitalize()} {weight}кг")
     
     result["items"] = list(set(found_items))
     
-    if not result["items"] and len(words) > 1:
-        rest = ' '.join(words[1:])
-        rest = re.sub(r'тел[:\s]*[\d\s\+\(\)\-]+', '', rest, flags=re.IGNORECASE)
-        if rest.strip():
-            result["items"] = [rest.strip()]
+    if not result["items"]:
+        rest_words = []
+        for w in words:
+            w_clean = re.sub(r'[^\w]', '', w).lower()
+            if w_clean == result["name"].lower():
+                continue
+            if w_clean.isdigit() and len(w_clean) >= 10:
+                continue
+            rest_words.append(w)
+        
+        if rest_words:
+            result["items"] = [" ".join(rest_words)]
     
-    days = {'пн':'понедельник', 'понедельник':'понедельник', 'вт':'вторник', 'вторник':'вторник',
-            'ср':'среда', 'среда':'среда', 'среду':'среда', 'чт':'четверг', 'четверг':'четверг',
-            'пт':'пятница', 'пятница':'пятница', 'пятницу':'пятница', 'сб':'суббота', 'суббота':'суббота',
-            'субботу':'суббота', 'вс':'воскресенье', 'воскресенье':'воскресенье',
-            'сегодня':'сегодня', 'завтра':'завтра'}
+    # ===== ДАТА =====
+    days = {
+        'пн': 'понедельник', 'понедельник': 'понедельник',
+        'вт': 'вторник', 'вторник': 'вторник',
+        'ср': 'среда', 'среда': 'среда', 'среду': 'среда',
+        'чт': 'четверг', 'четверг': 'четверг',
+        'пт': 'пятница', 'пятница': 'пятница', 'пятницу': 'пятница',
+        'сб': 'суббота', 'суббота': 'суббота', 'субботу': 'суббота',
+        'вс': 'воскресенье', 'воскресенье': 'воскресенье',
+        'сегодня': 'сегодня', 'завтра': 'завтра'
+    }
     
     for key, val in days.items():
         if key in text_lower:
             result["date"] = val
             break
     
-    date_match = re.search(r'(\d{1,2}[\./-]\d{1,2})', text_clean)
+    date_match = re.search(r'(\d{1,2}[\./-]\d{1,2}(?:[\./-]\d{2,4})?)', text_clean)
     if date_match:
         result["date"] = date_match.group(1)
     
