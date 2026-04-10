@@ -4,17 +4,17 @@ import os
 import re
 import json
 import logging
-import asyncio
 import threading
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext, CallbackQueryHandler
+import telebot
+from telebot import types
 import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
-# ==================== ФИКТИВНЫЙ ВЕБ-СЕРВЕР ====================
+# ==================== ФИКТИВНЫЙ ВЕБ-СЕРВЕР (для Render Web Service) ====================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -38,57 +38,69 @@ GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDENTIALS")
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def get_sheet():
-    creds_dict = json.loads(GOOGLE_CREDS_JSON)
-    gc = gspread.service_account_from_dict(creds_dict)
-    return gc.open_by_key(SHEET_ID).sheet1
+# Google Sheets авторизация
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+creds_dict = json.loads(GOOGLE_CREDS_JSON)
+creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+client = gspread.authorize(creds)
+sheet = client.open_by_key(SHEET_ID).sheet1
 
-# ==================== ГЛАВНОЕ МЕНЮ ====================
+# Бот
+bot = telebot.TeleBot(BOT_TOKEN)
+
+# Хранилище состояний пользователей
+user_state = {}
+user_data = {}
+
+# ==================== ГЛАВНОЕ МЕНЮ (КНОПКИ) ====================
 def main_menu():
-    keyboard = [
-        [KeyboardButton("➕ Новый заказ"), KeyboardButton("🔍 Найти")],
-        [KeyboardButton("📅 Сегодня"), KeyboardButton("📅 Завтра")],
-        [KeyboardButton("📋 Все активные")]
-    ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.row("➕ Новый заказ", "🔍 Найти")
+    keyboard.row("📅 Сегодня", "📅 Завтра")
+    keyboard.row("📋 Все активные")
+    return keyboard
 
 # ==================== РАБОТА С ТАБЛИЦЕЙ ====================
 def get_next_id():
-    sheet = get_sheet()
     rows = sheet.get_all_values()
     if len(rows) <= 1:
         return 1
-    ids = [int(r[0]) for r in rows[1:] if r[0].isdigit()]
+    ids = []
+    for r in rows[1:]:
+        if r and r[0].isdigit():
+            ids.append(int(r[0]))
     return max(ids) + 1 if ids else 1
 
 def add_order(client, phone, items, date, price=""):
-    sheet = get_sheet()
     order_id = get_next_id()
     created = datetime.now().strftime("%d.%m.%Y %H:%M")
     sheet.append_row([str(order_id), created, client, phone, items, date, price, "Активен"])
     return order_id
 
 def get_active_orders():
-    sheet = get_sheet()
     rows = sheet.get_all_values()
     if len(rows) <= 1:
         return []
     return [r for r in rows[1:] if len(r) >= 8 and r[7] == "Активен"]
 
 def update_status(order_id, status):
-    sheet = get_sheet()
-    cell = sheet.find(str(order_id))
-    if cell:
-        sheet.update_cell(cell.row, 8, status)
-        return True
+    try:
+        cell = sheet.find(str(order_id))
+        if cell:
+            sheet.update_cell(cell.row, 8, status)
+            return True
+    except:
+        pass
     return False
 
 def update_price(order_id, price):
-    sheet = get_sheet()
-    cell = sheet.find(str(order_id))
-    if cell:
-        sheet.update_cell(cell.row, 7, str(price))
-        return True
+    try:
+        cell = sheet.find(str(order_id))
+        if cell:
+            sheet.update_cell(cell.row, 7, str(price))
+            return True
+    except:
+        pass
     return False
 
 def find_orders(query):
@@ -96,8 +108,12 @@ def find_orders(query):
     q = query.lower()
     result = []
     for o in orders:
-        if len(o) > 3 and (q in o[2].lower() or q in o[3].lower() or q == o[0]):
-            result.append(o)
+        if len(o) > 3:
+            name = o[2].lower() if o[2] else ""
+            phone = o[3].lower() if o[3] else ""
+            order_id = o[0]
+            if q in name or q in phone or q == order_id:
+                result.append(o)
     return result
 
 def get_orders_by_date(date_str):
@@ -133,70 +149,102 @@ def parse_text(text):
     
     return result
 
-# ==================== ОБРАБОТЧИКИ ====================
-async def start(update: Update, context: CallbackContext):
-    await update.message.reply_text(
+# ==================== ОБРАБОТЧИКИ КОМАНД ====================
+@bot.message_handler(commands=['start'])
+def start(message):
+    chat_id = message.chat.id
+    user_state[chat_id] = None
+    user_data[chat_id] = {}
+    bot.send_message(
+        chat_id,
         "🔥 CRM КОПТИЛЬНЯ\n\nОтправьте текст заказа или используйте кнопки.",
         reply_markup=main_menu()
     )
 
-async def handle_message(update: Update, context: CallbackContext):
-    text = update.message.text
+@bot.message_handler(func=lambda m: True)
+def handle_message(message):
+    chat_id = message.chat.id
+    text = message.text
     
+    # Инициализация состояния
+    if chat_id not in user_state:
+        user_state[chat_id] = None
+        user_data[chat_id] = {}
+    
+    state = user_state.get(chat_id)
+    
+    # Кнопки меню
     if text == "➕ Новый заказ":
-        await update.message.reply_text("Введите имя клиента:")
-        context.user_data["state"] = "WAIT_NAME"
+        user_state[chat_id] = "WAIT_NAME"
+        bot.send_message(chat_id, "Введите имя клиента:")
         return
     
     elif text == "🔍 Найти":
-        await update.message.reply_text("Введите имя или телефон:")
-        context.user_data["state"] = "WAIT_SEARCH"
+        user_state[chat_id] = "WAIT_SEARCH"
+        bot.send_message(chat_id, "Введите имя или телефон:")
         return
     
     elif text == "📅 Сегодня":
         orders = get_orders_by_date("сегодня")
-        await show_orders(update, orders, "сегодня")
+        show_orders(chat_id, orders, "сегодня")
+        return
     
     elif text == "📅 Завтра":
         orders = get_orders_by_date("завтра")
-        await show_orders(update, orders, "завтра")
+        show_orders(chat_id, orders, "завтра")
+        return
     
     elif text == "📋 Все активные":
         orders = get_active_orders()
-        await show_orders(update, orders, "все")
+        show_orders(chat_id, orders, "все")
+        return
     
-    elif context.user_data.get("state") == "WAIT_NAME":
-        context.user_data["new_name"] = text
-        await update.message.reply_text("Введите телефон:")
-        context.user_data["state"] = "WAIT_PHONE"
+    # Обработка состояний
+    elif state == "WAIT_NAME":
+        user_data[chat_id]["new_name"] = text
+        user_state[chat_id] = "WAIT_PHONE"
+        bot.send_message(chat_id, "Введите телефон:")
     
-    elif context.user_data.get("state") == "WAIT_PHONE":
-        context.user_data["new_phone"] = text
-        await update.message.reply_text("Введите позиции (например: Грудинка 1.5 кг, Рёбра 1 кг):")
-        context.user_data["state"] = "WAIT_ITEMS"
+    elif state == "WAIT_PHONE":
+        user_data[chat_id]["new_phone"] = text
+        user_state[chat_id] = "WAIT_ITEMS"
+        bot.send_message(chat_id, "Введите позиции (например: Грудинка 1.5 кг, Рёбра 1 кг):")
     
-    elif context.user_data.get("state") == "WAIT_ITEMS":
-        context.user_data["new_items"] = text
-        await update.message.reply_text(
-            "Когда отдать?",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("Сегодня", callback_data="date_сегодня"),
-                 InlineKeyboardButton("Завтра", callback_data="date_завтра")]
-            ])
+    elif state == "WAIT_ITEMS":
+        user_data[chat_id]["new_items"] = text
+        user_state[chat_id] = "WAIT_DATE"
+        
+        kb = types.InlineKeyboardMarkup()
+        kb.add(
+            types.InlineKeyboardButton("Сегодня", callback_data="date_сегодня"),
+            types.InlineKeyboardButton("Завтра", callback_data="date_завтра")
         )
-        context.user_data["state"] = "WAIT_DATE"
+        bot.send_message(chat_id, "Когда отдать?", reply_markup=kb)
     
-    elif context.user_data.get("state") == "WAIT_SEARCH":
+    elif state == "WAIT_SEARCH":
         orders = find_orders(text)
         if orders:
-            reply = f"🔍 Найдено:\n\n"
+            reply = "🔍 Найдено:\n\n"
             for o in orders[:5]:
                 reply += f"#{o[0]} | {o[2]} | {o[3]}\n📦 {o[4]}\n💰 {o[6] if o[6] else '—'}₽\n\n"
-            await update.message.reply_text(reply, reply_markup=main_menu())
+            bot.send_message(chat_id, reply, reply_markup=main_menu())
         else:
-            await update.message.reply_text("Ничего не найдено.", reply_markup=main_menu())
-        context.user_data["state"] = None
+            bot.send_message(chat_id, "Ничего не найдено.", reply_markup=main_menu())
+        user_state[chat_id] = None
     
+    elif state == "WAIT_PRICE":
+        order_id = user_data[chat_id].get("price_for")
+        price_match = re.search(r'\d+', text)
+        if price_match and order_id:
+            price = price_match.group()
+            if update_price(order_id, price):
+                bot.send_message(chat_id, f"✅ Сумма {price}₽ сохранена.", reply_markup=main_menu())
+            else:
+                bot.send_message(chat_id, "❌ Ошибка.", reply_markup=main_menu())
+        user_state[chat_id] = None
+        user_data[chat_id]["price_for"] = None
+    
+    # Автораспознавание текста заказа
     elif re.search(r'\d{10}|\d+\.?\d*\s*кг', text, re.IGNORECASE):
         p = parse_text(text)
         if p["name"] or p["phone"]:
@@ -204,79 +252,64 @@ async def handle_message(update: Update, context: CallbackContext):
             order_id = add_order(p["name"] or "—", p["phone"] or "—", items_text, p["date"])
             
             reply = f"✅ Заказ #{order_id}\n👤 {p['name']}\n📞 {p['phone']}\n📅 {p['date']}\n📦 {items_text}"
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Выдать", callback_data=f"done_{order_id}"),
-                 InlineKeyboardButton("💰 Сумма", callback_data=f"price_{order_id}")]
-            ])
-            await update.message.reply_text(reply, reply_markup=keyboard)
+            
+            kb = types.InlineKeyboardMarkup()
+            kb.add(
+                types.InlineKeyboardButton("✅ Выдать", callback_data=f"done_{order_id}"),
+                types.InlineKeyboardButton("💰 Сумма", callback_data=f"price_{order_id}")
+            )
+            bot.send_message(chat_id, reply, reply_markup=kb)
     
     else:
-        await update.message.reply_text("Используйте кнопки меню.", reply_markup=main_menu())
+        bot.send_message(chat_id, "Используйте кнопки меню.", reply_markup=main_menu())
 
-async def show_orders(update, orders, period):
+def show_orders(chat_id, orders, period):
     if not orders:
-        await update.message.reply_text(f"📭 Нет заказов на {period}.", reply_markup=main_menu())
+        bot.send_message(chat_id, f"📭 Нет заказов на {period}.", reply_markup=main_menu())
         return
     reply = f"📋 {period}:\n\n"
     for o in orders[:10]:
         reply += f"#{o[0]} | {o[2]} | {o[3]}\n📦 {o[4]}\n💰 {o[6] if o[6] else '—'}₽\n\n"
-    await update.message.reply_text(reply, reply_markup=main_menu())
+    bot.send_message(chat_id, reply, reply_markup=main_menu())
 
-async def button_callback(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
+# ==================== ОБРАБОТКА INLINE-КНОПОК ====================
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callback(call):
+    chat_id = call.message.chat.id
+    data = call.data
     
     if data.startswith("done_"):
         order_id = data.split("_")[1]
         if update_status(order_id, "Выдан"):
-            await query.edit_message_text(f"✅ Заказ #{order_id} выдан.")
+            bot.edit_message_text(f"✅ Заказ #{order_id} выдан.", chat_id, call.message.message_id)
         else:
-            await query.edit_message_text("❌ Ошибка.")
+            bot.edit_message_text("❌ Ошибка.", chat_id, call.message.message_id)
     
     elif data.startswith("price_"):
         order_id = data.split("_")[1]
-        context.user_data["price_for"] = order_id
-        await query.edit_message_text(f"💰 Введите сумму для заказа #{order_id}:")
+        user_state[chat_id] = "WAIT_PRICE"
+        user_data[chat_id]["price_for"] = order_id
+        bot.edit_message_text(f"💰 Введите сумму для заказа #{order_id}:", chat_id, call.message.message_id)
     
     elif data.startswith("date_"):
         date_val = data.split("_")[1]
-        name = context.user_data.get("new_name", "")
-        phone = context.user_data.get("new_phone", "")
-        items = context.user_data.get("new_items", "")
+        name = user_data[chat_id].get("new_name", "")
+        phone = user_data[chat_id].get("new_phone", "")
+        items = user_data[chat_id].get("new_items", "")
         order_id = add_order(name, phone, items, date_val)
-        await query.edit_message_text(f"✅ Заказ #{order_id} создан!")
-        context.user_data["state"] = None
-
-async def handle_price(update: Update, context: CallbackContext):
-    if "price_for" in context.user_data:
-        order_id = context.user_data["price_for"]
-        price = re.search(r'\d+', update.message.text)
-        if price:
-            update_price(order_id, price.group())
-            await update.message.reply_text(f"✅ Сумма {price.group()}₽ сохранена.", reply_markup=main_menu())
-        del context.user_data["price_for"]
+        bot.edit_message_text(f"✅ Заказ #{order_id} создан!", chat_id, call.message.message_id)
+        user_state[chat_id] = None
+        user_data[chat_id] = {}
 
 # ==================== ЗАПУСК ====================
-async def main_async():
-    """Асинхронная функция запуска"""
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button_callback))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_handler(MessageHandler(filters.Regex(r'^\d+$'), handle_price))
-    
-    logger.info("Бот запущен...")
-    
-    await application.run_polling()
-
 def main():
     # Запускаем веб-сервер в отдельном потоке
     threading.Thread(target=run_web_server, daemon=True).start()
     
-    # Запускаем бота с правильным event loop
-    asyncio.run(main_async())
+    logger.info("Бот запущен...")
+    
+    # Запускаем бота (синхронно, без event loop)
+    bot.polling(none_stop=True)
 
 if __name__ == "__main__":
     main()
