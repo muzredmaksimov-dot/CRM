@@ -8,6 +8,8 @@ import threading
 import calendar
 import csv
 import io
+import time
+import requests
 from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -117,7 +119,9 @@ def format_phone_for_markdown(phone):
     if not phone or phone == "—":
         return "—"
     info = clean_phone(phone)
-    return f"[{info['display']}](tel:{info['tel']})"
+    if info:
+        return f"[{info['display']}](tel:{info['tel']})"
+    return phone
 
 # ==================== КАЛЕНДАРЬ ====================
 def get_calendar_keyboard(year=None, month=None):
@@ -171,16 +175,18 @@ def get_next_id():
             ids.append(int(r[0]))
     return max(ids) + 1 if ids else 1
 
-def add_order(client, phone, items, date, price=""):
+def add_order(client, phone, items, date, price="", order_type="Самовывоз"):
     order_id = get_next_id()
     created = datetime.now().strftime("%d.%m.%Y %H:%M")
-    sheet.append_row([str(order_id), created, client, phone, items, date, price, "Активен"])
+    sheet.append_row([str(order_id), created, client, phone, items, date, price, "Активен", order_type])
     return order_id
 
 def get_order_by_id(order_id):
     rows = sheet.get_all_values()
     for r in rows[1:]:
         if len(r) > 0 and r[0] == str(order_id):
+            while len(r) < 9:
+                r.append("Самовывоз")
             return r
     return None
 
@@ -188,7 +194,13 @@ def get_active_orders():
     rows = sheet.get_all_values()
     if len(rows) <= 1:
         return []
-    return [r for r in rows[1:] if len(r) >= 8 and r[7] == "Активен"]
+    result = []
+    for r in rows[1:]:
+        if len(r) >= 8 and r[7] == "Активен":
+            while len(r) < 9:
+                r.append("Самовывоз")
+            result.append(r)
+    return result
 
 def get_all_orders():
     rows = sheet.get_all_values()
@@ -224,6 +236,9 @@ def update_phone(order_id, phone):
 def update_date(order_id, date):
     return update_order_field(order_id, 6, date)
 
+def update_order_type(order_id, order_type):
+    return update_order_field(order_id, 9, order_type)
+
 def find_orders(query):
     orders = get_active_orders()
     q = query.lower().strip()
@@ -249,32 +264,49 @@ def get_orders_by_date(date_str):
 def export_orders_to_csv(orders):
     output = io.StringIO()
     writer = csv.writer(output, delimiter=';')
-    writer.writerow(['ID', 'Создан', 'Клиент', 'Телефон', 'Позиции', 'Дата выдачи', 'Сумма', 'Статус'])
+    writer.writerow(['ID', 'Создан', 'Клиент', 'Телефон', 'Позиции', 'Дата выдачи', 'Сумма', 'Статус', 'Тип'])
     for order in orders:
-        row = order[:8]
-        while len(row) < 8:
+        row = order[:9]
+        while len(row) < 9:
             row.append("")
         writer.writerow(row)
     output.seek(0)
     return output.getvalue().encode('utf-8-sig')
 
-# ==================== ПАРСЕР v4 ====================
+# ==================== ПАРСЕР v5 ====================
 def parse_order_text(text):
+    """Парсер v5 — с поиском имени в любом месте и игнорированием вежливых фраз"""
     result = {"name": "", "phone": "", "items": [], "date": None}
     confidence = 0
     text_clean = text.replace('\n', ' ').replace('\r', ' ').strip()
     text_lower = text_clean.lower()
+    
+    # Удаляем вежливые фразы
+    polite_phrases = [
+        'добрый день', 'добрый вечер', 'доброе утро', 'здравствуйте', 'привет',
+        'можно пожалуйста', 'можно', 'пожалуйста', 'будьте добры', 'закажите',
+        'хочу заказать', 'хочу', 'мне', 'для меня', 'напишите', 'подскажите'
+    ]
+    for phrase in polite_phrases:
+        text_lower = text_lower.replace(phrase, '')
+    text_lower = re.sub(r'\s+', ' ', text_lower).strip()
+    text_clean = text_lower
+    
+    # Замены
     text_lower = text_lower.replace("полкило", "0.5 кг").replace("пол кило", "0.5 кг").replace("полтора", "1.5")
+    text_lower = text_lower.replace("с/с", "").replace("с/сл", "").replace("сл/с", "")
     text_lower = re.sub(r'([а-яёa-z])(\d)', r'\1 \2', text_lower)
     text_lower = re.sub(r'(\d)([а-яёa-z])', r'\1 \2', text_lower)
     
+    # Расширенный словарь продуктов
     product_map = {
         'рёбра': 'Ребра', 'ребра': 'Ребра', 'ребро': 'Ребра',
         'форели': 'Форель', 'форель': 'Форель',
         'сала': 'Сало', 'сало': 'Сало',
         'грудинки': 'Грудинка', 'грудинка': 'Грудинка',
         'утка': 'Утка', 'утки': 'Утка',
-        'сумбрия': 'Скумбрия', 'скумбрия': 'Скумбрия', 'сумбрии': 'Скумбрия',
+        'сумбрия': 'Скумбрия', 'скумбрия': 'Скумбрия',
+        'балык': 'Балык', 'балыка': 'Балык',
     }
     
     # Телефон
@@ -283,38 +315,47 @@ def parse_order_text(text):
         if 10 <= len(digits) <= 12:
             if digits.startswith(('8', '7', '3')) or digits.startswith('80'):
                 phone_info = clean_phone(digits)
-                result["phone"] = phone_info['display']
-                result["phone_raw"] = phone_info['raw']
-                confidence += 1
-                text_clean = text_clean.replace(digits, '').strip()
-                text_lower = text_clean.lower()
-                break
+                if phone_info:
+                    result["phone"] = phone_info['display']
+                    result["phone_raw"] = phone_info['raw']
+                    confidence += 1
+                    text_clean = text_clean.replace(digits, '').strip()
+                    text_lower = text_clean.lower()
+                    break
     
-    if not result["phone"]:
-        phone_pattern = r'(\+?3?7?5?\s?\(?\d{2,3}\)?\s?\d{3}[\s\-]?\d{2}[\s\-]?\d{2})'
-        match = re.search(phone_pattern, text_clean)
-        if match:
-            digits_only = re.sub(r'\D', '', match.group(1))
-            if 10 <= len(digits_only) <= 12:
-                phone_info = clean_phone(digits_only)
-                result["phone"] = phone_info['display']
-                result["phone_raw"] = phone_info['raw']
-                confidence += 1
-                text_clean = text_clean.replace(match.group(1), '').strip()
-                text_lower = text_clean.lower()
-    
-    # Имя
+    # Имя — ищем в любом месте
     not_names = {
-        'ребра', 'рёбра', 'форель', 'сало', 'грудинка', 'утка', 'сумбрия', 'скумбрия',
-        'кг', 'гр', 'г', 'тел', 'телефон', 'заказ', 'хочу', 'возьми', 'положи', 'закажи',
-        'на', 'в', 'с', 'и', 'а', 'к', 'от', 'до', 'по', 'у', 'я', 'мне'
+        'ребра', 'рёбра', 'форель', 'сало', 'грудинка', 'утка', 'сумбрия', 'скумбрия', 'балык',
+        'кг', 'гр', 'г', 'тел', 'телефон', 'заказ', 'на', 'в', 'с', 'и', 'а', 'к', 'от', 'до', 'по', 'у'
     }
+    
+    known_names = {'маша', 'мария', 'андрей', 'оля', 'ольга', 'дима', 'дмитрий', 
+                   'саша', 'александр', 'лена', 'елена', 'наташа', 'наталья',
+                   'сергей', 'иван', 'анна', 'татьяна', 'таня', 'катя', 'екатерина'}
+    
     words = text_lower.split()
-    if words:
-        first_word = words[0].strip('.,!?;:')
-        if first_word and first_word not in not_names and not first_word.isdigit():
-            result["name"] = first_word.capitalize()
+    
+    for word in words:
+        word_clean = word.strip('.,!?;:')
+        if word_clean in known_names:
+            result["name"] = word_clean.capitalize()
             confidence += 1
+            break
+    
+    if not result["name"]:
+        for word in words:
+            word_clean = word.strip('.,!?;:')
+            if 2 <= len(word_clean) <= 5 and word_clean not in not_names and not word_clean.isdigit():
+                is_product_part = False
+                for prod in product_map:
+                    if word_clean in prod:
+                        is_product_part = True
+                        break
+                if not is_product_part:
+                    result["name"] = word_clean.capitalize()
+                    confidence += 1
+                    break
+    
     if not result["name"]:
         result["name"] = "Клиент"
     
@@ -335,11 +376,35 @@ def parse_order_text(text):
         name = match.group(1).strip()
         weight_str = match.group(2).strip()
         unit = match.group(3) if match.group(3) else ''
-        if name in not_names and name not in product_map:
+        
+        if name == result["name"].lower():
             continue
+        
         weight = parse_weight(weight_str, unit)
         if weight is None:
             continue
+        
+        name_clean = product_map.get(name, name.capitalize())
+        if weight == int(weight):
+            weight_display = str(int(weight))
+        else:
+            weight_display = str(weight).rstrip('0').rstrip('.')
+        key = f"{name_clean}_{weight_display}"
+        found_items[key] = f"{name_clean} {weight_display}кг"
+    
+    pattern2 = re.compile(r'(\d+[\.\,]?\d*)\s*(кг|гр?|g)?\s+([а-яёa-z]{2,})', re.IGNORECASE)
+    for match in pattern2.finditer(text_lower):
+        weight_str = match.group(1).strip()
+        unit = match.group(2) if match.group(2) else ''
+        name = match.group(3).strip()
+        
+        if name == result["name"].lower():
+            continue
+        
+        weight = parse_weight(weight_str, unit)
+        if weight is None:
+            continue
+        
         name_clean = product_map.get(name, name.capitalize())
         if weight == int(weight):
             weight_display = str(int(weight))
@@ -402,7 +467,8 @@ def edit_menu_buttons(order_id):
         types.InlineKeyboardButton("📅 Дата", callback_data=f"editdate_{order_id}")
     )
     kb.add(
-        types.InlineKeyboardButton("💰 Сумма", callback_data=f"editprice_{order_id}")
+        types.InlineKeyboardButton("💰 Сумма", callback_data=f"editprice_{order_id}"),
+        types.InlineKeyboardButton("🚗 Тип", callback_data=f"edittype_{order_id}")
     )
     kb.add(
         types.InlineKeyboardButton("✅ Готово", callback_data=f"backto_{order_id}")
@@ -416,26 +482,31 @@ def format_order_message(order):
     items = order[4] if len(order) > 4 else "—"
     date = order[5] if len(order) > 5 else "—"
     price = order[6] if len(order) > 6 and order[6] else "—"
+    order_type = order[8] if len(order) > 8 else "Самовывоз"
+    
+    type_emoji = "🚶" if order_type == "Самовывоз" else "🚚"
     
     msg = f"📋 Заказ #{order_id}\n"
     msg += f"👤 {client}\n"
     msg += f"📞 {format_phone_for_markdown(phone)}\n"
     msg += f"📦 {items}\n"
     msg += f"📅 {date}\n"
-    msg += f"💰 {price}₽"
+    msg += f"💰 {price}₽\n"
+    msg += f"{type_emoji} {order_type}"
     return msg
 
-def create_order_from_parsed(chat_id, parsed):
+def create_order_from_parsed(chat_id, parsed, order_type="Самовывоз"):
     items_text = ", ".join(parsed["items"]) if parsed["items"] else "Не указано"
     date = parsed["date"] if parsed["date"] else "сегодня"
     phone_raw = parsed.get("phone_raw", parsed["phone"])
-    order_id = add_order(parsed["name"], phone_raw, items_text, date)
+    order_id = add_order(parsed["name"], phone_raw, items_text, date, "", order_type)
     
     msg = f"✅ Заказ #{order_id} создан!\n\n"
     msg += f"👤 {parsed['name']}\n"
     msg += f"📞 {format_phone_for_markdown(phone_raw)}\n"
     msg += f"📦 {items_text}\n"
-    msg += f"📅 {date}"
+    msg += f"📅 {date}\n"
+    msg += f"🚶 Самовывоз"
     
     bot.send_message(chat_id, msg, reply_markup=order_action_buttons(order_id), parse_mode='Markdown')
     return order_id
@@ -618,8 +689,13 @@ def handle_message(message):
                 )
                 bot.send_message(chat_id, msg, reply_markup=kb)
             else:
-                create_order_from_parsed(chat_id, parsed)
-                user_data[chat_id].pop("pending_parsed", None)
+                # Запрашиваем тип заказа
+                kb = types.InlineKeyboardMarkup(row_width=2)
+                kb.add(
+                    types.InlineKeyboardButton("🚶 Самовывоз", callback_data="type_Самовывоз"),
+                    types.InlineKeyboardButton("🚚 Доставка", callback_data="type_Доставка")
+                )
+                bot.send_message(chat_id, "🚗 Выберите тип заказа:", reply_markup=kb)
         else:
             bot.send_message(
                 chat_id,
@@ -690,12 +766,47 @@ def handle_callback(call):
         user_state[chat_id] = f"EDIT_PRICE_{order_id}"
         bot.edit_message_text("💰 Введите новую сумму:", chat_id, call.message.message_id)
     
+    elif data.startswith("edittype_"):
+        order_id = data.split("_")[1]
+        kb = types.InlineKeyboardMarkup(row_width=2)
+        kb.add(
+            types.InlineKeyboardButton("🚶 Самовывоз", callback_data=f"settype_{order_id}_Самовывоз"),
+            types.InlineKeyboardButton("🚚 Доставка", callback_data=f"settype_{order_id}_Доставка")
+        )
+        bot.edit_message_text("🚗 Выберите тип заказа:", chat_id, call.message.message_id, reply_markup=kb)
+    
+    elif data.startswith("settype_"):
+        parts = data.split("_")
+        order_id = parts[1]
+        order_type = parts[2]
+        if update_order_type(order_id, order_type):
+            bot.answer_callback_query(call.id, f"✅ Тип изменён на {order_type}")
+            order = get_order_by_id(order_id)
+            if order:
+                msg = format_order_message(order)
+                bot.edit_message_text(msg, chat_id, call.message.message_id, reply_markup=order_action_buttons(order_id), parse_mode='Markdown')
+        else:
+            bot.answer_callback_query(call.id, "❌ Ошибка")
+    
+    elif data.startswith("type_"):
+        order_type = data.split("_")[1]
+        parsed = user_data.get(chat_id, {}).get("pending_parsed")
+        if parsed:
+            create_order_from_parsed(chat_id, parsed, order_type)
+            user_data[chat_id].pop("pending_parsed", None)
+            bot.edit_message_text("✅ Заказ создан!", chat_id, call.message.message_id)
+        else:
+            bot.edit_message_text("❌ Данные утеряны.", chat_id, call.message.message_id)
+    
     elif data == "confirm_yes":
         parsed = user_data.get(chat_id, {}).get("pending_parsed")
         if parsed:
-            create_order_from_parsed(chat_id, parsed)
-            user_data[chat_id].pop("pending_parsed", None)
-            bot.edit_message_text("✅ Заказ создан!", chat_id, call.message.message_id)
+            kb = types.InlineKeyboardMarkup(row_width=2)
+            kb.add(
+                types.InlineKeyboardButton("🚶 Самовывоз", callback_data="type_Самовывоз"),
+                types.InlineKeyboardButton("🚚 Доставка", callback_data="type_Доставка")
+            )
+            bot.edit_message_text("🚗 Выберите тип заказа:", chat_id, call.message.message_id, reply_markup=kb)
         else:
             bot.edit_message_text("❌ Данные утеряны.", chat_id, call.message.message_id)
     
@@ -755,22 +866,31 @@ def handle_callback(call):
             phone = user_data[chat_id].get("new_phone", "")
             phone_clean = clean_phone(phone)['raw'] if phone else ""
             items = user_data[chat_id].get("new_items", "")
-            order_id = add_order(name, phone_clean, items, display_date)
             
-            msg = f"✅ Заказ #{order_id} создан!\n\n"
-            msg += f"👤 {name}\n📞 {format_phone_for_markdown(phone_clean)}\n📦 {items}\n📅 {display_date}"
-            bot.edit_message_text(msg, chat_id, call.message.message_id, parse_mode='Markdown')
-            bot.send_message(chat_id, "Готово!", reply_markup=main_menu())
-            user_state[chat_id] = None
-            user_data[chat_id] = {}
+            # Сохраняем данные и запрашиваем тип
+            user_data[chat_id]["temp_name"] = name
+            user_data[chat_id]["temp_phone"] = phone_clean
+            user_data[chat_id]["temp_items"] = items
+            user_data[chat_id]["temp_date"] = display_date
+            
+            kb = types.InlineKeyboardMarkup(row_width=2)
+            kb.add(
+                types.InlineKeyboardButton("🚶 Самовывоз", callback_data="temp_Самовывоз"),
+                types.InlineKeyboardButton("🚚 Доставка", callback_data="temp_Доставка")
+            )
+            bot.edit_message_text("🚗 Выберите тип заказа:", chat_id, call.message.message_id, reply_markup=kb)
+            user_state[chat_id] = "WAIT_TYPE"
         
         elif state == "WAIT_AUTO_DATE":
             parsed = user_data[chat_id].get("pending_parsed", {})
             if parsed:
                 parsed["date"] = display_date
-                create_order_from_parsed(chat_id, parsed)
-                user_data[chat_id].pop("pending_parsed", None)
-                bot.edit_message_text("✅ Заказ создан!", chat_id, call.message.message_id)
+                kb = types.InlineKeyboardMarkup(row_width=2)
+                kb.add(
+                    types.InlineKeyboardButton("🚶 Самовывоз", callback_data="type_Самовывоз"),
+                    types.InlineKeyboardButton("🚚 Доставка", callback_data="type_Доставка")
+                )
+                bot.edit_message_text("🚗 Выберите тип заказа:", chat_id, call.message.message_id, reply_markup=kb)
             user_state[chat_id] = None
         
         elif state and state.startswith("EDIT_DATE_"):
@@ -788,14 +908,55 @@ def handle_callback(call):
         else:
             bot.answer_callback_query(call.id, f"Выбрана дата: {display_date}")
     
+    elif data.startswith("temp_"):
+        order_type = data.split("_")[1]
+        name = user_data[chat_id].get("temp_name", "")
+        phone = user_data[chat_id].get("temp_phone", "")
+        items = user_data[chat_id].get("temp_items", "")
+        date = user_data[chat_id].get("temp_date", "сегодня")
+        
+        order_id = add_order(name, phone, items, date, "", order_type)
+        
+        msg = f"✅ Заказ #{order_id} создан!\n\n"
+        msg += f"👤 {name}\n"
+        msg += f"📞 {format_phone_for_markdown(phone)}\n"
+        msg += f"📦 {items}\n"
+        msg += f"📅 {date}\n"
+        msg += f"{'🚶' if order_type == 'Самовывоз' else '🚚'} {order_type}"
+        
+        bot.edit_message_text(msg, chat_id, call.message.message_id, parse_mode='Markdown')
+        bot.send_message(chat_id, "Готово!", reply_markup=main_menu())
+        
+        # Очищаем временные данные
+        for key in ["temp_name", "temp_phone", "temp_items", "temp_date"]:
+            user_data[chat_id].pop(key, None)
+        user_state[chat_id] = None
+    
     elif data == "ignore":
         bot.answer_callback_query(call.id)
 
 # ==================== ЗАПУСК ====================
 def main():
+    # Очищаем старые сессии Telegram API
+    try:
+        requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true", timeout=5)
+        logger.info("✅ Старые вебхуки и pending updates очищены")
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось очистить вебхуки: {e}")
+    
+    # Запускаем веб-сервер в отдельном потоке
     threading.Thread(target=run_web_server, daemon=True).start()
-    logger.info("Бот запущен...")
-    bot.polling(none_stop=True)
+    logger.info("🌐 Веб-сервер запущен")
+    logger.info("🤖 Бот запущен...")
+    
+    # Бесконечный цикл с переподключением при ошибке
+    while True:
+        try:
+            bot.polling(none_stop=True)
+        except Exception as e:
+            logger.error(f"❌ Ошибка polling: {e}")
+            logger.info("🔄 Перезапуск через 5 секунд...")
+            time.sleep(5)
 
 if __name__ == "__main__":
     main()
