@@ -95,6 +95,7 @@ def main_menu():
     keyboard.row("➕ Новый заказ", "🔍 Найти")
     keyboard.row("📅 Сегодня", "📅 Завтра")
     keyboard.row("📋 Все активные", "📊 Экспорт")
+    keyboard.row("📊 Таблица")
     return keyboard
 
 # ==================== ОЧИСТКА ТЕЛЕФОНА ====================
@@ -403,7 +404,7 @@ def handle_message(message):
     state = user_state.get(chat_id)
     
     # Кнопки меню — сбрасываем состояние
-    if text in ["➕ Новый заказ", "🔍 Найти", "📅 Сегодня", "📅 Завтра", "📋 Все активные", "📊 Экспорт"]:
+    if text in ["➕ Новый заказ", "🔍 Найти", "📅 Сегодня", "📅 Завтра", "📋 Все активные", "📊 Экспорт", "📊 Таблица"]:
         user_state[chat_id] = None
     
     if text == "➕ Новый заказ":
@@ -462,6 +463,11 @@ def handle_message(message):
             types.InlineKeyboardButton("Все заказы", callback_data="export_всевсе")
         )
         bot.send_message(chat_id, "📊 Выберите период для экспорта:", reply_markup=kb)
+        return
+    
+    elif text == "📊 Таблица":
+        sheet_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}"
+        bot.send_message(chat_id, f"📊 Ссылка на таблицу:\n{sheet_url}", reply_markup=main_menu())
         return
     
     # Обработка состояний
@@ -753,7 +759,7 @@ def handle_callback(call):
                 msg += f"💰 {price}₽\n"
             msg += f"🚶 Самовывоз"
             
-            bot.edit_message_text(msg, chat_id, call.message.message_id, parse_mode='Markdown')
+            bot.edit_message_text(msg, chat_id, call.message.message_id, parse_mode='Markdown', reply_markup=order_action_buttons(order_id))
             bot.send_message(chat_id, "Готово!", reply_markup=main_menu())
             
             for key in ["temp_name", "temp_phone", "temp_items", "temp_date", "temp_price", "temp_type"]:
@@ -831,8 +837,7 @@ def handle_callback(call):
             if address:
                 msg += f"\n📍 {address}"
             
-            bot.edit_message_text(msg, chat_id, call.message.message_id, parse_mode='Markdown')
-            bot.send_message(chat_id, "Готово!", reply_markup=main_menu())
+            bot.edit_message_text(msg, chat_id, call.message.message_id, parse_mode='Markdown', reply_markup=order_action_buttons(order_id))
             
             for key in ["new_name", "new_phone", "new_items", "new_price", "new_type", "new_address"]:
                 user_data[chat_id].pop(key, None)
