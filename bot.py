@@ -174,18 +174,18 @@ def get_next_id():
             ids.append(int(r[0]))
     return max(ids) + 1 if ids else 1
 
-def add_order(client, phone, items, date, price="", order_type="Самовывоз"):
+def add_order(client, phone, items, date, price="", order_type="Самовывоз", address=""):
     order_id = get_next_id()
     created = datetime.now().strftime("%d.%m.%Y %H:%M")
-    sheet.append_row([str(order_id), created, client, phone, items, date, price, "Активен", order_type])
+    sheet.append_row([str(order_id), created, client, phone, items, date, price, "Активен", order_type, address])
     return order_id
 
 def get_order_by_id(order_id):
     rows = sheet.get_all_values()
     for r in rows[1:]:
         if len(r) > 0 and r[0] == str(order_id):
-            while len(r) < 9:
-                r.append("Самовывоз")
+            while len(r) < 10:
+                r.append("")
             return r
     return None
 
@@ -196,8 +196,8 @@ def get_active_orders():
     result = []
     for r in rows[1:]:
         if len(r) >= 8 and r[7] == "Активен":
-            while len(r) < 9:
-                r.append("Самовывоз")
+            while len(r) < 10:
+                r.append("")
             result.append(r)
     return result
 
@@ -238,6 +238,9 @@ def update_date(order_id, date):
 def update_order_type(order_id, order_type):
     return update_order_field(order_id, 9, order_type)
 
+def update_address(order_id, address):
+    return update_order_field(order_id, 10, address)
+
 def find_orders(query):
     orders = get_active_orders()
     q = query.lower().strip()
@@ -263,269 +266,14 @@ def get_orders_by_date(date_str):
 def export_orders_to_csv(orders):
     output = io.StringIO()
     writer = csv.writer(output, delimiter=';')
-    writer.writerow(['ID', 'Создан', 'Клиент', 'Телефон', 'Позиции', 'Дата выдачи', 'Сумма', 'Статус', 'Тип'])
+    writer.writerow(['ID', 'Создан', 'Клиент', 'Телефон', 'Позиции', 'Дата', 'Сумма', 'Статус', 'Тип', 'Адрес'])
     for order in orders:
-        row = order[:9]
-        while len(row) < 9:
+        row = order[:10]
+        while len(row) < 10:
             row.append("")
         writer.writerow(row)
     output.seek(0)
     return output.getvalue().encode('utf-8-sig')
-
-# ==================== ПАРСЕР v6 — ФИНАЛЬНЫЙ ====================
-def parse_order_text(text):
-    """Парсер v6 — с расширенными словарями имён и продуктов"""
-    result = {"name": "", "phone": "", "items": [], "date": None}
-    confidence = 0
-    text_clean = text.replace('\n', ' ').replace('\r', ' ').strip()
-    text_lower = text_clean.lower()
-    
-    # Удаляем вежливые фразы
-    polite_phrases = [
-        'добрый день', 'добрый вечер', 'доброе утро', 'здравствуйте', 'привет',
-        'можно пожалуйста', 'можно', 'пожалуйста', 'будьте добры', 'закажите',
-        'хочу заказать', 'хочу', 'мне', 'для меня', 'напишите', 'подскажите'
-    ]
-    for phrase in polite_phrases:
-        text_lower = text_lower.replace(phrase, '')
-    text_lower = re.sub(r'\s+', ' ', text_lower).strip()
-    text_clean = text_lower
-    
-    # Замены для веса
-    text_lower = text_lower.replace("полкило", "0.5 кг")
-    text_lower = text_lower.replace("пол кило", "0.5 кг")
-    text_lower = text_lower.replace("полтора", "1.5")
-    text_lower = text_lower.replace("килограм", "1 кг")
-    text_lower = text_lower.replace("кило", "1 кг")
-    text_lower = text_lower.replace("кг", " кг ")
-    text_lower = re.sub(r'\s+', ' ', text_lower).strip()
-    
-    # Убираем обозначения посола
-    text_lower = text_lower.replace("с/с", "").replace("с/сл", "").replace("сл/с", "")
-    text_lower = text_lower.replace("г/к", "").replace("х/к", "").replace("хк", "")
-    
-    # Разделяем слипшиеся слова
-    text_lower = re.sub(r'([а-яёa-z])(\d)', r'\1 \2', text_lower)
-    text_lower = re.sub(r'(\d)([а-яёa-z])', r'\1 \2', text_lower)
-    
-    # ===== РАСШИРЕННЫЙ СЛОВАРЬ ИМЁН =====
-    known_names = {
-        # Мужские
-        'андрей', 'андрюша', 'андрейка', 'сергей', 'серёжа', 'серега', 'серж',
-        'александр', 'саша', 'саня', 'шура', 'алекс', 'дмитрий', 'дима', 'димон', 'митя',
-        'владимир', 'вова', 'володя', 'влад', 'алексей', 'алёша', 'лёша', 'лёха',
-        'иван', 'ваня', 'ванюша', 'максим', 'макс', 'никита', 'никитос', 'ник',
-        'руслан', 'рус', 'русик', 'артём', 'артем', 'тёма', 'денис', 'ден',
-        'кирилл', 'киря', 'павел', 'паша', 'михаил', 'миша', 'евгений', 'женя',
-        'игорь', 'игорёк', 'олег', 'олежка', 'юрий', 'юра', 'виктор', 'витя',
-        'николай', 'коля', 'василий', 'вася', 'пётр', 'петр', 'петя',
-        'антон', 'тоха', 'владислав', 'владик', 'вячеслав', 'слава', 'станислав', 'стас',
-        'константин', 'костя', 'роман', 'рома', 'илья', 'илюха', 'даниил', 'даня',
-        'матвей', 'тимофей', 'тима', 'егор', 'степан', 'стёпа', 'семён', 'семен', 'сёма',
-        'арсений', 'арсен', 'богдан', 'бодя', 'захар', 'геннадий', 'гена',
-        'григорий', 'гриша', 'леонид', 'лёня', 'валентин', 'валя', 'валерий', 'валера',
-        'анатолий', 'толя', 'борис', 'боря', 'эдуард', 'эдик', 'альберт', 'алик',
-        'артур', 'марат', 'рустам', 'тимур', 'рамиль', 'рафаэль', 'ренат',
-        # Женские
-        'маша', 'мария', 'маруся', 'оля', 'ольга', 'олечка', 'анна', 'аня', 'анюта',
-        'елена', 'лена', 'ленок', 'наталья', 'наташа', 'ната', 'татьяна', 'таня', 'танюша',
-        'екатерина', 'катя', 'катюша', 'ирина', 'ира', 'ирочка', 'юлия', 'юля', 'юлька',
-        'светлана', 'света', 'дарья', 'даша', 'анастасия', 'настя', 'виктория', 'вика',
-        'ксения', 'ксюша', 'елизавета', 'лиза', 'александра', 'сашенька', 'марина', 'мариша',
-        'людмила', 'люда', 'галина', 'галя', 'надежда', 'надя', 'вера', 'верочка',
-        'любовь', 'люба', 'тамара', 'тома', 'валентина', 'валя', 'лариса', 'лара',
-        'нина', 'алла', 'софия', 'соня', 'софья', 'маргарита', 'рита', 'вероника', 'ника',
-        'кристина', 'кристи', 'диана', 'ангелина', 'геля', 'алина', 'алинка',
-        'полина', 'поля', 'арина', 'ариша', 'милана', 'мила', 'эльвира', 'эля',
-        'регина', 'оксана', 'снежана', 'владислава', 'влада', 'яна', 'эмма', 'эвелина', 'эва',
-    }
-    
-    # ===== ПОЛНЫЙ СЛОВАРЬ ПРОДУКТОВ =====
-    product_map = {
-        # Грудинка
-        'грудинка': 'Грудинка г/к', 'грудинки': 'Грудинка г/к', 'грудинку': 'Грудинка г/к',
-        'грудинка гк': 'Грудинка г/к', 'грудинка г/к': 'Грудинка г/к',
-        # Корейка
-        'корейка': 'Корейка на кости г/к', 'корейки': 'Корейка на кости г/к',
-        'корейка на кости': 'Корейка на кости г/к',
-        # Индейка
-        'филе индейки': 'Филе индейки', 'индейка филе': 'Филе индейки',
-        'бедро индейки': 'Бедро индейки', 'бедра индейки': 'Бедро индейки',
-        # Утка
-        'утка': 'Филе домашней утки', 'утки': 'Филе домашней утки',
-        'филе утки': 'Филе домашней утки', 'домашняя утка': 'Филе домашней утки',
-        # Закуски
-        'закуска': 'Закуска из ушей с языком', 'закуска из ушей': 'Закуска из ушей с языком',
-        'уши': 'Закуска из ушей с языком', 'уши с языком': 'Закуска из ушей с языком',
-        # Сосиски
-        'сосиски': 'Сосиски сливочные', 'сосиски сливочные': 'Сосиски сливочные',
-        # Сервелат
-        'сервелат': 'Сервелат (свин/гов)', 'сервелат свингов': 'Сервелат (свин/гов)',
-        # Ветчина
-        'ветчина': 'Ветчина балыковая', 'ветчина балыковая': 'Ветчина балыковая',
-        # Балык
-        'балык': 'Балык', 'балыка': 'Балык', 'балька': 'Балык', 'балычок': 'Балык',
-        'балык хк': 'Балык х/к', 'балык х/к': 'Балык х/к',
-        'балык сс': 'Балык с/с', 'балык с/с': 'Балык с/с',
-        'блык': 'Балык',
-        # Рулеты
-        'рулет': 'Рулет', 'рулет трио': 'Рулет трио',
-        'рулет из форели': 'Рулет из форели с/с', 'трио': 'Рулет трио',
-        # Рыба
-        'скумбрия': 'Скумбрия х/к', 'скумбрии': 'Скумбрия х/к',
-        'скумбрия хк': 'Скумбрия х/к', 'скумбрия х/к': 'Скумбрия х/к',
-        'селёдка': 'Селёдка Исландия', 'селедка': 'Селёдка Исландия',
-        'сельдь': 'Селёдка Исландия', 'исландия': 'Селёдка Исландия',
-        'форель': 'Форель', 'форели': 'Форель', 'юкола': 'Юкола',
-        # Колбасы
-        'колбаса': 'Колбаса', 'колбаса форель': 'Колбаса форель/креветка',
-        'колбаса креветка': 'Колбаса форель/креветка',
-        'мини колбаски': 'Мини колбаски 3 вида', 'колбаски': 'Мини колбаски 3 вида',
-        # Пресерва
-        'пресерва': 'Пресерва форель с/с', 'пресервы': 'Пресерва форель с/с',
-        'пресерва форель': 'Пресерва форель с/с',
-        # Универсальные
-        'рёбра': 'Ребра', 'ребра': 'Ребра', 'сала': 'Сало', 'сало': 'Сало',
-    }
-    
-    # Телефон
-    all_digits = re.findall(r'\d+', text_clean)
-    for digits in sorted(all_digits, key=len, reverse=True):
-        if 10 <= len(digits) <= 12:
-            if digits.startswith(('8', '7', '3')) or digits.startswith('80'):
-                phone_info = clean_phone(digits)
-                if phone_info:
-                    result["phone"] = phone_info['display']
-                    result["phone_raw"] = phone_info['raw']
-                    confidence += 1
-                    text_clean = text_clean.replace(digits, '').strip()
-                    text_lower = text_clean.lower()
-                    break
-    
-    words = text_lower.split()
-    
-    # Ищем известное имя
-    for word in words:
-        word_clean = word.strip('.,!?;:')
-        if word_clean in known_names:
-            result["name"] = word_clean.capitalize()
-            confidence += 1
-            break
-    
-    # Если не нашли — берём последнее слово
-    not_names = {'кг', 'гр', 'г', 'тел', 'телефон', 'заказ', 'на', 'в', 'с', 'и', 'а', 'к', 'от', 'до', 'по', 'у'}
-    if not result["name"] and len(words) > 0:
-        last_word = words[-1].strip('.,!?;:')
-        if 2 <= len(last_word) <= 7 and last_word not in not_names and not last_word.isdigit():
-            is_product = False
-            for prod in product_map:
-                if last_word in prod:
-                    is_product = True
-                    break
-            if not is_product:
-                result["name"] = last_word.capitalize()
-                confidence += 1
-    
-    if not result["name"]:
-        result["name"] = "Клиент"
-    
-    # Позиции
-    found_items = {}
-    
-    def parse_weight(w_str, unit=''):
-        try:
-            w_str = w_str.replace(',', '.')
-            weight = float(w_str)
-            if unit and ('гр' in unit or 'г' in unit or 'g' in unit):
-                if weight >= 50:
-                    weight = weight / 1000
-            return weight
-        except:
-            return None
-    
-    # Паттерн 1: продукт + число
-    pattern1 = re.compile(r'([а-яёa-z]{2,})\s*[:\-\s]?\s*(\d+[\.\,]?\d*)\s*(кг|гр?|g)?', re.IGNORECASE)
-    for match in pattern1.finditer(text_lower):
-        name = match.group(1).strip()
-        weight_str = match.group(2).strip()
-        unit = match.group(3) if match.group(3) else ''
-        
-        if name == result["name"].lower():
-            continue
-        
-        weight = parse_weight(weight_str, unit)
-        if weight is None:
-            continue
-        
-        name_clean = product_map.get(name, name.capitalize())
-        
-        if weight == int(weight):
-            weight_display = str(int(weight))
-        else:
-            weight_display = str(weight).rstrip('0').rstrip('.')
-        
-        key = f"{name_clean}_{weight_display}"
-        found_items[key] = f"{name_clean} {weight_display}кг"
-    
-    # Паттерн 2: число + продукт
-    pattern2 = re.compile(r'(\d+[\.\,]?\d*)\s*(кг|гр?|g)?\s+([а-яёa-z]{2,})', re.IGNORECASE)
-    for match in pattern2.finditer(text_lower):
-        weight_str = match.group(1).strip()
-        unit = match.group(2) if match.group(2) else ''
-        name = match.group(3).strip()
-        
-        if name == result["name"].lower():
-            continue
-        
-        weight = parse_weight(weight_str, unit)
-        if weight is None:
-            continue
-        
-        name_clean = product_map.get(name, name.capitalize())
-        
-        if weight == int(weight):
-            weight_display = str(int(weight))
-        else:
-            weight_display = str(weight).rstrip('0').rstrip('.')
-        
-        key = f"{name_clean}_{weight_display}"
-        found_items[key] = f"{name_clean} {weight_display}кг"
-    
-    result["items"] = list(found_items.values())
-    if result["items"]:
-        confidence += 1
-    
-    # Дата
-    if "через" in text_lower:
-        match = re.search(r'через\s+(\d+)\s*д', text_lower)
-        if match:
-            days = int(match.group(1))
-            result["date"] = (datetime.now() + timedelta(days=days)).strftime("%d.%m")
-            confidence += 1
-    
-    if not result["date"]:
-        days_map = {
-            'пн': 'понедельник', 'понедельник': 'понедельник', 'вт': 'вторник', 'вторник': 'вторник',
-            'ср': 'среда', 'среда': 'среда', 'среду': 'среда', 'чт': 'четверг', 'четверг': 'четверг',
-            'пт': 'пятница', 'пятница': 'пятница', 'пятницу': 'пятница',
-            'сб': 'суббота', 'суббота': 'суббота', 'субботу': 'суббота',
-            'вс': 'воскресенье', 'воскресенье': 'воскресенье',
-            'сегодня': 'сегодня', 'завтра': 'завтра'
-        }
-        for key, val in days_map.items():
-            if key in text_lower:
-                result["date"] = val
-                confidence += 1
-                break
-    
-    if not result["date"]:
-        date_match = re.search(r'(\d{1,2}[\./-]\d{1,2})', text_clean)
-        if date_match:
-            result["date"] = date_match.group(1)
-            confidence += 1
-    
-    result["confidence"] = confidence
-    return result
 
 # ==================== КНОПКИ ====================
 def order_action_buttons(order_id):
@@ -533,6 +281,9 @@ def order_action_buttons(order_id):
     kb.add(
         types.InlineKeyboardButton("✅ Выдать", callback_data=f"done_{order_id}"),
         types.InlineKeyboardButton("✏️ Ред.", callback_data=f"edit_{order_id}")
+    )
+    kb.add(
+        types.InlineKeyboardButton("📋 Сообщение клиенту", callback_data=f"msg_{order_id}")
     )
     return kb
 
@@ -551,7 +302,11 @@ def edit_menu_buttons(order_id):
         types.InlineKeyboardButton("🚗 Тип", callback_data=f"edittype_{order_id}")
     )
     kb.add(
-        types.InlineKeyboardButton("✅ Готово", callback_data=f"backto_{order_id}")
+        types.InlineKeyboardButton("📍 Адрес", callback_data=f"editaddress_{order_id}")
+    )
+    kb.add(
+        types.InlineKeyboardButton("✅ Готово", callback_data=f"backto_{order_id}"),
+        types.InlineKeyboardButton("❌ Отмена", callback_data=f"canceledit_{order_id}")
     )
     return kb
 
@@ -563,6 +318,7 @@ def format_order_message(order):
     date = order[5] if len(order) > 5 else "—"
     price = order[6] if len(order) > 6 and order[6] else "—"
     order_type = order[8] if len(order) > 8 else "Самовывоз"
+    address = order[9] if len(order) > 9 else ""
     
     type_emoji = "🚶" if order_type == "Самовывоз" else "🚚"
     
@@ -573,23 +329,9 @@ def format_order_message(order):
     msg += f"📅 {date}\n"
     msg += f"💰 {price}₽\n"
     msg += f"{type_emoji} {order_type}"
+    if address:
+        msg += f"\n📍 {address}"
     return msg
-
-def create_order_from_parsed(chat_id, parsed, order_type="Самовывоз"):
-    items_text = ", ".join(parsed["items"]) if parsed["items"] else "Не указано"
-    date = parsed["date"] if parsed["date"] else "сегодня"
-    phone_raw = parsed.get("phone_raw", parsed["phone"])
-    order_id = add_order(parsed["name"], phone_raw, items_text, date, "", order_type)
-    
-    msg = f"✅ Заказ #{order_id} создан!\n\n"
-    msg += f"👤 {parsed['name']}\n"
-    msg += f"📞 {format_phone_for_markdown(phone_raw)}\n"
-    msg += f"📦 {items_text}\n"
-    msg += f"📅 {date}\n"
-    msg += f"{'🚶' if order_type == 'Самовывоз' else '🚚'} {order_type}"
-    
-    bot.send_message(chat_id, msg, reply_markup=order_action_buttons(order_id), parse_mode='Markdown')
-    return order_id
 
 # ==================== ОБРАБОТЧИКИ ====================
 @bot.message_handler(commands=['start'])
@@ -602,11 +344,49 @@ def start(message):
     user_data[chat_id] = {}
     bot.send_message(
         chat_id,
-        "🔥 CRM КОПТИЛЬНЯ\n\n"
-        "Отправьте сообщение от клиента, и я создам заказ.\n\n"
-        "Пример: андрей ребра 0,5кг форель 200гр 80447706110",
+        "🔥 CRM LARICH FOOD\n\n"
+        "Нажмите «➕ Новый заказ» для создания заказа.\n\n"
+        "Поиск: /find\n"
+        "Заказы на сегодня: /today\n"
+        "Заказы на завтра: /tomorrow",
         reply_markup=main_menu()
     )
+
+@bot.message_handler(commands=['find'])
+def cmd_find(message):
+    if not is_admin(message):
+        return
+    chat_id = message.chat.id
+    user_state[chat_id] = "WAIT_SEARCH"
+    bot.send_message(chat_id, "🔍 Введите имя или телефон для поиска:")
+
+@bot.message_handler(commands=['today'])
+def cmd_today(message):
+    if not is_admin(message):
+        return
+    chat_id = message.chat.id
+    orders = get_orders_by_date("сегодня")
+    if not orders:
+        bot.send_message(chat_id, "📭 Нет заказов на сегодня.")
+    else:
+        bot.send_message(chat_id, f"📅 Заказов на сегодня: {len(orders)}")
+        for o in orders:
+            msg = format_order_message(o)
+            bot.send_message(chat_id, msg, reply_markup=order_action_buttons(o[0]), parse_mode='Markdown')
+
+@bot.message_handler(commands=['tomorrow'])
+def cmd_tomorrow(message):
+    if not is_admin(message):
+        return
+    chat_id = message.chat.id
+    orders = get_orders_by_date("завтра")
+    if not orders:
+        bot.send_message(chat_id, "📭 Нет заказов на завтра.")
+    else:
+        bot.send_message(chat_id, f"📅 Заказов на завтра: {len(orders)}")
+        for o in orders:
+            msg = format_order_message(o)
+            bot.send_message(chat_id, msg, reply_markup=order_action_buttons(o[0]), parse_mode='Markdown')
 
 @bot.message_handler(func=lambda m: True)
 def handle_message(message):
@@ -622,9 +402,13 @@ def handle_message(message):
     
     state = user_state.get(chat_id)
     
+    # Кнопки меню — сбрасываем состояние
+    if text in ["➕ Новый заказ", "🔍 Найти", "📅 Сегодня", "📅 Завтра", "📋 Все активные", "📊 Экспорт"]:
+        user_state[chat_id] = None
+    
     if text == "➕ Новый заказ":
         user_state[chat_id] = "WAIT_NAME"
-        bot.send_message(chat_id, "Введите имя клиента:")
+        bot.send_message(chat_id, "👤 Введите имя клиента:")
         return
     
     elif text == "🔍 Найти":
@@ -680,18 +464,37 @@ def handle_message(message):
         bot.send_message(chat_id, "📊 Выберите период для экспорта:", reply_markup=kb)
         return
     
-    elif state == "WAIT_NAME":
+    # Обработка состояний
+    if state == "WAIT_NAME":
         user_data[chat_id]["new_name"] = text
         user_state[chat_id] = "WAIT_PHONE"
-        bot.send_message(chat_id, "Введите телефон:")
+        bot.send_message(chat_id, "📞 Введите номер телефона (или '-' если нет):")
     
     elif state == "WAIT_PHONE":
-        user_data[chat_id]["new_phone"] = text
+        phone = text if text != "-" else ""
+        user_data[chat_id]["new_phone"] = phone
         user_state[chat_id] = "WAIT_ITEMS"
-        bot.send_message(chat_id, "Введите позиции:")
+        bot.send_message(chat_id, "📦 Введите позиции заказа:")
     
     elif state == "WAIT_ITEMS":
         user_data[chat_id]["new_items"] = text
+        user_state[chat_id] = "WAIT_TYPE"
+        kb = types.InlineKeyboardMarkup(row_width=2)
+        kb.add(
+            types.InlineKeyboardButton("🚶 Самовывоз", callback_data="newtype_Самовывоз"),
+            types.InlineKeyboardButton("🚚 Доставка", callback_data="newtype_Доставка")
+        )
+        bot.send_message(chat_id, "🚗 Выберите тип заказа:", reply_markup=kb)
+    
+    elif state == "WAIT_ADDRESS":
+        address = text
+        user_data[chat_id]["new_address"] = address
+        user_state[chat_id] = "WAIT_PRICE"
+        bot.send_message(chat_id, "💰 Введите стоимость (или '-' если неизвестно):")
+    
+    elif state == "WAIT_PRICE":
+        price = text if text != "-" else ""
+        user_data[chat_id]["new_price"] = price
         user_state[chat_id] = "WAIT_DATE"
         kb = get_calendar_keyboard()
         bot.send_message(chat_id, "📅 Выберите дату выдачи:", reply_markup=kb)
@@ -735,8 +538,14 @@ def handle_message(message):
                 else:
                     bot.send_message(chat_id, "❌ Ошибка")
             elif field == "PRICE":
-                if update_price(order_id, text):
-                    bot.send_message(chat_id, f"✅ Сумма изменена на {text}₽")
+                price_match = re.search(r'\d+', text)
+                if price_match and update_price(order_id, price_match.group()):
+                    bot.send_message(chat_id, f"✅ Сумма изменена на {price_match.group()}₽")
+                else:
+                    bot.send_message(chat_id, "❌ Ошибка")
+            elif field == "ADDRESS":
+                if update_address(order_id, text):
+                    bot.send_message(chat_id, f"✅ Адрес изменён на {text}")
                 else:
                     bot.send_message(chat_id, "❌ Ошибка")
             
@@ -747,41 +556,33 @@ def handle_message(message):
         
         user_state[chat_id] = None
     
-    else:
-        parsed = parse_order_text(text)
+    elif state == "WAIT_TEMP_ADDRESS":
+        address = text
+        name = user_data[chat_id].get("temp_name", "")
+        phone = user_data[chat_id].get("temp_phone", "")
+        items = user_data[chat_id].get("temp_items", "")
+        date = user_data[chat_id].get("temp_date", "сегодня")
+        price = user_data[chat_id].get("temp_price", "")
+        order_type = user_data[chat_id].get("temp_type", "Доставка")
         
-        if parsed["phone"] or parsed["items"]:
-            confidence = parsed.get("confidence", 0)
-            user_data[chat_id]["pending_parsed"] = parsed
-            
-            if confidence < 2:
-                msg = "⚠️ Проверьте заказ:\n\n"
-                msg += f"👤 {parsed['name']}\n"
-                msg += f"📞 {parsed['phone'] or '—'}\n"
-                msg += f"📦 {', '.join(parsed['items']) if parsed['items'] else '—'}\n"
-                msg += f"📅 {parsed['date'] or 'не указана'}\n\n"
-                msg += "Всё верно?"
-                
-                kb = types.InlineKeyboardMarkup()
-                kb.row(
-                    types.InlineKeyboardButton("✅ Да, создать", callback_data="confirm_yes"),
-                    types.InlineKeyboardButton("✏️ Исправить", callback_data="confirm_edit")
-                )
-                bot.send_message(chat_id, msg, reply_markup=kb)
-            else:
-                kb = types.InlineKeyboardMarkup(row_width=2)
-                kb.add(
-                    types.InlineKeyboardButton("🚶 Самовывоз", callback_data="type_Самовывоз"),
-                    types.InlineKeyboardButton("🚚 Доставка", callback_data="type_Доставка")
-                )
-                bot.send_message(chat_id, "🚗 Выберите тип заказа:", reply_markup=kb)
-        else:
-            bot.send_message(
-                chat_id,
-                "❌ Не удалось распознать заказ.\n"
-                "Пример: андрей ребра 0,5кг форель 200гр 80447706110",
-                reply_markup=main_menu()
-            )
+        order_id = add_order(name, phone, items, date, price, order_type, address)
+        
+        msg = f"✅ Заказ #{order_id} создан!\n\n"
+        msg += f"👤 {name}\n"
+        msg += f"📞 {format_phone_for_markdown(phone)}\n"
+        msg += f"📦 {items}\n"
+        msg += f"📅 {date}\n"
+        if price:
+            msg += f"💰 {price}₽\n"
+        msg += f"🚚 Доставка\n"
+        msg += f"📍 {address}"
+        
+        bot.send_message(chat_id, msg, reply_markup=order_action_buttons(order_id), parse_mode='Markdown')
+        bot.send_message(chat_id, "Готово!", reply_markup=main_menu())
+        
+        for key in ["temp_name", "temp_phone", "temp_items", "temp_date", "temp_price", "temp_type"]:
+            user_data[chat_id].pop(key, None)
+        user_state[chat_id] = None
 
 # ==================== INLINE-КНОПКИ ====================
 @bot.callback_query_handler(func=lambda call: True)
@@ -792,6 +593,7 @@ def handle_callback(call):
     chat_id = call.message.chat.id
     data = call.data
     
+    # Выдать заказ
     if data.startswith("done_"):
         order_id = data.split("_")[1]
         if update_status(order_id, "Выдан"):
@@ -800,6 +602,34 @@ def handle_callback(call):
         else:
             bot.answer_callback_query(call.id, "❌ Ошибка")
     
+    # Сообщение клиенту
+    elif data.startswith("msg_"):
+        order_id = data.split("_")[1]
+        order = get_order_by_id(order_id)
+        if order:
+            client = order[2] if len(order) > 2 else "Клиент"
+            items = order[4] if len(order) > 4 else ""
+            date = order[5] if len(order) > 5 else ""
+            price = order[6] if len(order) > 6 and order[6] else ""
+            order_type = order[8] if len(order) > 8 else "Самовывоз"
+            address = order[9] if len(order) > 9 else ""
+            
+            msg = f"✅ Ваш заказ #{order_id} в Larich Food принят!\n\n"
+            msg += f"Состав: {items}\n"
+            msg += f"Дата: {date}\n"
+            if price:
+                msg += f"Сумма: {price}₽\n"
+            msg += f"Тип: {'🚶 Самовывоз' if order_type == 'Самовывоз' else '🚚 Доставка'}\n"
+            if address:
+                msg += f"Адрес: {address}\n"
+            msg += "\nСпасибо за заказ! Мы свяжемся с вами перед выдачей."
+            
+            bot.answer_callback_query(call.id, "✅ Текст готов, скопируйте ниже")
+            bot.send_message(chat_id, f"<pre>{msg}</pre>", parse_mode='HTML')
+        else:
+            bot.answer_callback_query(call.id, "❌ Заказ не найден")
+    
+    # Меню редактирования
     elif data.startswith("edit_"):
         order_id = data.split("_")[1]
         order = get_order_by_id(order_id)
@@ -809,6 +639,7 @@ def handle_callback(call):
         else:
             bot.answer_callback_query(call.id, "Заказ не найден")
     
+    # Назад к заказу
     elif data.startswith("backto_"):
         order_id = data.split("_")[1]
         order = get_order_by_id(order_id)
@@ -819,6 +650,19 @@ def handle_callback(call):
             bot.answer_callback_query(call.id, "Заказ не найден")
         user_state[chat_id] = None
     
+    # Отмена редактирования
+    elif data.startswith("canceledit_"):
+        order_id = data.split("_")[1]
+        order = get_order_by_id(order_id)
+        if order:
+            msg = format_order_message(order)
+            bot.edit_message_text(msg, chat_id, call.message.message_id, reply_markup=order_action_buttons(order_id), parse_mode='Markdown')
+        else:
+            bot.edit_message_text("❌ Заказ не найден.", chat_id, call.message.message_id)
+        user_state[chat_id] = None
+        bot.answer_callback_query(call.id, "Редактирование отменено")
+    
+    # Редактирование полей
     elif data.startswith("editname_"):
         order_id = data.split("_")[1]
         user_state[chat_id] = f"EDIT_NAME_{order_id}"
@@ -854,6 +698,11 @@ def handle_callback(call):
         )
         bot.edit_message_text("🚗 Выберите тип заказа:", chat_id, call.message.message_id, reply_markup=kb)
     
+    elif data.startswith("editaddress_"):
+        order_id = data.split("_")[1]
+        user_state[chat_id] = f"EDIT_ADDRESS_{order_id}"
+        bot.edit_message_text("📍 Введите новый адрес:", chat_id, call.message.message_id)
+    
     elif data.startswith("settype_"):
         parts = data.split("_")
         order_id = parts[1]
@@ -867,32 +716,51 @@ def handle_callback(call):
         else:
             bot.answer_callback_query(call.id, "❌ Ошибка")
     
-    elif data.startswith("type_"):
+    # Выбор типа при создании (новый заказ)
+    elif data.startswith("newtype_"):
         order_type = data.split("_")[1]
-        parsed = user_data.get(chat_id, {}).get("pending_parsed")
-        if parsed:
-            create_order_from_parsed(chat_id, parsed, order_type)
-            user_data[chat_id].pop("pending_parsed", None)
-            bot.edit_message_text("✅ Заказ создан!", chat_id, call.message.message_id)
+        user_data[chat_id]["new_type"] = order_type
+        
+        if order_type == "Доставка":
+            user_state[chat_id] = "WAIT_ADDRESS"
+            bot.edit_message_text("📍 Введите адрес доставки:", chat_id, call.message.message_id)
         else:
-            bot.edit_message_text("❌ Данные утеряны.", chat_id, call.message.message_id)
+            user_state[chat_id] = "WAIT_PRICE"
+            bot.edit_message_text("💰 Введите стоимость (или '-' если неизвестно):", chat_id, call.message.message_id)
     
-    elif data == "confirm_yes":
-        parsed = user_data.get(chat_id, {}).get("pending_parsed")
-        if parsed:
-            kb = types.InlineKeyboardMarkup(row_width=2)
-            kb.add(
-                types.InlineKeyboardButton("🚶 Самовывоз", callback_data="type_Самовывоз"),
-                types.InlineKeyboardButton("🚚 Доставка", callback_data="type_Доставка")
-            )
-            bot.edit_message_text("🚗 Выберите тип заказа:", chat_id, call.message.message_id, reply_markup=kb)
+    # Выбор типа при создании из календаря
+    elif data.startswith("temp_"):
+        order_type = data.split("_")[1]
+        if order_type == "Доставка":
+            user_state[chat_id] = "WAIT_TEMP_ADDRESS"
+            user_data[chat_id]["temp_type"] = order_type
+            bot.edit_message_text("📍 Введите адрес доставки:", chat_id, call.message.message_id)
         else:
-            bot.edit_message_text("❌ Данные утеряны.", chat_id, call.message.message_id)
+            name = user_data[chat_id].get("temp_name", "")
+            phone = user_data[chat_id].get("temp_phone", "")
+            items = user_data[chat_id].get("temp_items", "")
+            date = user_data[chat_id].get("temp_date", "сегодня")
+            price = user_data[chat_id].get("temp_price", "")
+            
+            order_id = add_order(name, phone, items, date, price, order_type)
+            
+            msg = f"✅ Заказ #{order_id} создан!\n\n"
+            msg += f"👤 {name}\n"
+            msg += f"📞 {format_phone_for_markdown(phone)}\n"
+            msg += f"📦 {items}\n"
+            msg += f"📅 {date}\n"
+            if price:
+                msg += f"💰 {price}₽\n"
+            msg += f"🚶 Самовывоз"
+            
+            bot.edit_message_text(msg, chat_id, call.message.message_id, parse_mode='Markdown')
+            bot.send_message(chat_id, "Готово!", reply_markup=main_menu())
+            
+            for key in ["temp_name", "temp_phone", "temp_items", "temp_date", "temp_price", "temp_type"]:
+                user_data[chat_id].pop(key, None)
+            user_state[chat_id] = None
     
-    elif data == "confirm_edit":
-        bot.edit_message_text("✏️ Отправьте исправленный текст заказа:", chat_id, call.message.message_id)
-        user_state[chat_id] = "WAIT_MANUAL_EDIT"
-    
+    # Экспорт
     elif data.startswith("export_"):
         period = data.split("_")[1]
         if period == "сегодня":
@@ -918,6 +786,7 @@ def handle_callback(call):
         else:
             bot.answer_callback_query(call.id, "📭 Нет заказов за этот период.")
     
+    # Календарь
     elif data.startswith("cal_"):
         parts = data.split("_")
         if len(parts) == 3:
@@ -945,30 +814,28 @@ def handle_callback(call):
             phone = user_data[chat_id].get("new_phone", "")
             phone_clean = clean_phone(phone)['raw'] if phone else ""
             items = user_data[chat_id].get("new_items", "")
+            price = user_data[chat_id].get("new_price", "")
+            order_type = user_data[chat_id].get("new_type", "Самовывоз")
+            address = user_data[chat_id].get("new_address", "")
             
-            user_data[chat_id]["temp_name"] = name
-            user_data[chat_id]["temp_phone"] = phone_clean
-            user_data[chat_id]["temp_items"] = items
-            user_data[chat_id]["temp_date"] = display_date
+            order_id = add_order(name, phone_clean, items, display_date, price, order_type, address)
             
-            kb = types.InlineKeyboardMarkup(row_width=2)
-            kb.add(
-                types.InlineKeyboardButton("🚶 Самовывоз", callback_data="temp_Самовывоз"),
-                types.InlineKeyboardButton("🚚 Доставка", callback_data="temp_Доставка")
-            )
-            bot.edit_message_text("🚗 Выберите тип заказа:", chat_id, call.message.message_id, reply_markup=kb)
-            user_state[chat_id] = "WAIT_TYPE"
-        
-        elif state == "WAIT_AUTO_DATE":
-            parsed = user_data[chat_id].get("pending_parsed", {})
-            if parsed:
-                parsed["date"] = display_date
-                kb = types.InlineKeyboardMarkup(row_width=2)
-                kb.add(
-                    types.InlineKeyboardButton("🚶 Самовывоз", callback_data="type_Самовывоз"),
-                    types.InlineKeyboardButton("🚚 Доставка", callback_data="type_Доставка")
-                )
-                bot.edit_message_text("🚗 Выберите тип заказа:", chat_id, call.message.message_id, reply_markup=kb)
+            msg = f"✅ Заказ #{order_id} создан!\n\n"
+            msg += f"👤 {name}\n"
+            msg += f"📞 {format_phone_for_markdown(phone_clean)}\n"
+            msg += f"📦 {items}\n"
+            msg += f"📅 {display_date}\n"
+            if price:
+                msg += f"💰 {price}₽\n"
+            msg += f"{'🚶' if order_type == 'Самовывоз' else '🚚'} {order_type}"
+            if address:
+                msg += f"\n📍 {address}"
+            
+            bot.edit_message_text(msg, chat_id, call.message.message_id, parse_mode='Markdown')
+            bot.send_message(chat_id, "Готово!", reply_markup=main_menu())
+            
+            for key in ["new_name", "new_phone", "new_items", "new_price", "new_type", "new_address"]:
+                user_data[chat_id].pop(key, None)
             user_state[chat_id] = None
         
         elif state and state.startswith("EDIT_DATE_"):
@@ -985,29 +852,6 @@ def handle_callback(call):
         
         else:
             bot.answer_callback_query(call.id, f"Выбрана дата: {display_date}")
-    
-    elif data.startswith("temp_"):
-        order_type = data.split("_")[1]
-        name = user_data[chat_id].get("temp_name", "")
-        phone = user_data[chat_id].get("temp_phone", "")
-        items = user_data[chat_id].get("temp_items", "")
-        date = user_data[chat_id].get("temp_date", "сегодня")
-        
-        order_id = add_order(name, phone, items, date, "", order_type)
-        
-        msg = f"✅ Заказ #{order_id} создан!\n\n"
-        msg += f"👤 {name}\n"
-        msg += f"📞 {format_phone_for_markdown(phone)}\n"
-        msg += f"📦 {items}\n"
-        msg += f"📅 {date}\n"
-        msg += f"{'🚶' if order_type == 'Самовывоз' else '🚚'} {order_type}"
-        
-        bot.edit_message_text(msg, chat_id, call.message.message_id, parse_mode='Markdown')
-        bot.send_message(chat_id, "Готово!", reply_markup=main_menu())
-        
-        for key in ["temp_name", "temp_phone", "temp_items", "temp_date"]:
-            user_data[chat_id].pop(key, None)
-        user_state[chat_id] = None
     
     elif data == "ignore":
         bot.answer_callback_query(call.id)
